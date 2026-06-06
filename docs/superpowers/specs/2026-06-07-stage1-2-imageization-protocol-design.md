@@ -69,7 +69,7 @@ Stage 1.2 输入粒度保持为 sample-channel：
 原始 item 矩阵: [L_total, 5]
 单个 registry row: (subset, item_id, channel, history_start_idx, history_end_idx)
 Stage 1.2 输入: x_history: [history_len]
-Stage 1.2 输出: image_tensor: [3, H, W]
+Stage 1.2 输出: view_tensor: [V, H, W], 第一版 V=3
 ```
 
 `ind_1` 到 `ind_5` 不在 Stage 1.2 内融合。后续如果需要多通道版本，应作为单独消融或后续阶段，例如：
@@ -81,15 +81,16 @@ Stage 1.2 输出: image_tensor: [3, H, W]
 
 这些内容不进入 Stage 1.2 主实现。
 
-### 4.2 输出是 view-channel tensor，不是 RGB 图片
+### 4.2 输出是 view tensor，不是 RGB 图片
 
 第一版输出固定为：
 
 ```text
-image_tensor: [3, H, W]
+view_tensor: [V, H, W]
+V = 3
 ```
 
-但这 3 个 channel 的语义是 3 个 view，而不是自然图像 RGB：
+这 3 个维度是 view dimension，不是自然图像 RGB channel：
 
 | view index | 名称 | 作用 |
 | ---: | --- | --- |
@@ -97,7 +98,21 @@ image_tensor: [3, H, W]
 | 1 | `period_fold` | 表达周期内 / 周期间结构 |
 | 2 | `fft_power` | 表达轻量频域能量分布 |
 
-因此文档和 manifest 中统一使用 `view_channels` 或 `view_names`，避免把它称为 RGB。
+三个 view 的横纵轴语义并不完全相同：
+
+| view | 横轴含义 | 纵轴含义 |
+| --- | --- | --- |
+| `line_raster` | time index | normalized value height |
+| `period_fold` | phase within period | cycle / period block |
+| `fft_power` | frequency bin | repeated or rasterized frequency power |
+
+因此沿 `V` 维堆叠只是统一张量容器，不表示三个 view 在同一个 `(h, w)` 位置有 RGB 式的像素对齐语义。文档和 manifest 中统一使用 `view_tensor`、`view_dim` 或 `view_names`，避免称为 RGB。
+
+后续接视觉 encoder 时必须显式选择 view 消费方式，而不是默认套用 RGB 假设：
+
+- `per_view_grayscale_repeat`：每个 view 单独 repeat 成 `[3, H, W]`，分别过 frozen RGB ViT，再融合 embedding。
+- `learned_view_adapter`：用小型 `1x1 conv` 或 patch embedding adapter 将 `[V, H, W]` 映射到 encoder 输入。
+- `custom_patch_embedding`：直接让 patch embedding 接收 `V` 个 view，适合后续训练或微调。
 
 debug PNG 不保存为 RGB 混色图作为主解释口径。推荐保存：
 
@@ -105,11 +120,13 @@ debug PNG 不保存为 RGB 混色图作为主解释口径。推荐保存：
 - 或三联灰度图；
 - 可选另存彩色合成图，但只作快速浏览，不作为正式解释依据。
 
-### 4.3 VisionTS-like history-only instance normalization
+### 4.3 VisionTS-like per-window history-only instance normalization
 
-Stage 1.2 第一版归一化采用 VisionTS-like mean/std instance normalization，只使用 history：
+Stage 1.2 第一版归一化采用 VisionTS-like mean/std instance normalization。这里的 instance 指单个 `physical_window_id` 对应的 sample-channel history window，不是全数据集统计，也不是同一个 item 的完整历史统计。
 
 ```text
+对每个 physical_window_id:
+x_history = 当前 sample-channel 的 history [history_len]
 mean = mean(x_history)
 std = std(x_history, unbiased=False)
 x_norm = (x_history - mean) / (std / norm_const)
@@ -130,6 +147,7 @@ clip_max: 5.0
 注意：
 
 - 归一化严禁读取 future target。
+- batch 实现中，若输入为 `[B, L]`，则 `mean/std` 的 shape 应为 `[B, 1]`，每个窗口独立计算。
 - `std < eps` 时使用 `eps`，避免除零。
 - `mean/std/norm_const/clip_min/clip_max` 必须写入 metadata。
 - Stage 1.1 中的 median/IQR proxy 继续保留为统计特征，但不作为 Stage 1.2 第一版主归一化。
@@ -141,7 +159,7 @@ clip_max: 5.0
 ```text
 input:  torch.Tensor [B, L]
 period: torch.Tensor 或 list[int]，长度 B
-output: torch.Tensor [B, 3, H, W]
+output: torch.Tensor [B, V, H, W]
 ```
 
 实现原则：
@@ -303,7 +321,7 @@ outputs/vision_ts_routing/image_tensors/
 建议文件：
 
 ```text
-image_tensor_sample.npz
+view_tensor_sample.npz
 image_index.csv
 manifest.json
 debug_png/
@@ -311,7 +329,7 @@ debug_png/
 
 其中：
 
-- `image_tensor_sample.npz`：保存 smoke tensor，shape `[N, 3, H, W]`。
+- `view_tensor_sample.npz`：保存 smoke tensor，shape `[N, V, H, W]`，第一版 `V=3`。
 - `image_index.csv`：每行对应 tensor 中一个样本，保留 `physical_window_id`、`sample_set_id`、`subset`、`split`、`item_id`、`channel`、`period`、normalization metadata、padding metadata。
 - `manifest.json`：记录协议版本、视图定义、shape、抽样策略、输入 registry/proxy 路径、latency。
 - `debug_png/`：少量 PNG，用于人工检查，不作为训练输入。
@@ -329,9 +347,16 @@ debug_png/
   "input_registry_dir": "...",
   "input_proxy_dir": "...",
   "view_names": ["line_raster", "period_fold", "fft_power"],
-  "tensor_shape": ["N", 3, 64, 192],
+  "view_dim": 3,
+  "tensor_shape": ["N", "V", 64, 192],
+  "view_axis_semantics": {
+    "line_raster": {"x": "time_index", "y": "normalized_value_height"},
+    "period_fold": {"x": "phase_within_period", "y": "cycle_or_period_block"},
+    "fft_power": {"x": "frequency_bin", "y": "rasterized_frequency_power"}
+  },
   "normalization": {
     "method": "instance_mean_std",
+    "scope": "per_physical_window_id_history",
     "norm_const": 0.4,
     "eps": 1e-5,
     "clip_min": -5.0,
@@ -344,7 +369,7 @@ debug_png/
     "random_seed": 20260607
   },
   "channel_policy": "sample_channel_independent",
-  "view_channel_semantics": "not_rgb",
+  "view_tensor_semantics": "multi_view_not_rgb",
   "debug_png_policy": "sampled_only",
   "runs_visual_encoder": false,
   "runs_expert_models": false,
@@ -359,7 +384,7 @@ Stage 1.2 实现前应先写测试。
 最低测试覆盖：
 
 1. `normalize_history()` 只基于 history 输入，输出有限值，并返回 metadata。
-2. `imageize_batch()` 接受 `[B, L]` 和 period，输出 `[B, 3, H, W]`。
+2. `imageize_batch()` 接受 `[B, L]` 和 period，输出 `[B, V, H, W]`，第一版 `V=3`。
 3. `period_fold` 对 `period=24` 的 192 点序列不需要 padding。
 4. `period_fold` 对 `period=144` 的 192 点序列需要 padding，并记录 padding 信息。
 5. `physical_window_id` 在 `image_index.csv` 中唯一。
@@ -380,7 +405,7 @@ conda run -n quito python -m pytest tests -q
 以下问题重要，但不在 Stage 1.2 第一版实现：
 
 - 是否直接使用 frozen ImageNet ViT。
-- 是否为 view-channel tensor 增加 learned 1x1 adapter。
+- 是否为 view tensor 增加 learned 1x1 adapter。
 - 是否改为 per-view grayscale repeat 后分别过视觉 encoder。
 - 是否加入 GAF / RP / CWT / STFT。
 - 是否做 multichannel imageization。
@@ -392,11 +417,11 @@ conda run -n quito python -m pytest tests -q
 
 ## 11. 风险与检查点
 
-### 风险 1：3 个 view-channel 被误当作 RGB
+### 风险 1：3 个 view 被误当作 RGB
 
 处理：
 
-- 代码、manifest、文档统一称为 `view_channels`。
+- 代码、manifest、文档统一称为 `view_tensor` 或 `view_dim`。
 - debug 默认三联灰度图。
 - 后续接 frozen RGB ViT 时必须单独记录 adapter 策略。
 
