@@ -182,3 +182,26 @@ Stage 1.0 已完成。
 1. 进入 Stage 1.1：sample-channel light proxy 预计算。
 2. Stage 1.1 应读取 `window_index.csv`，只使用 history 窗口计算在线可复现的轻量 meta-features。
 3. 继续不要实现 router，直到 light proxy、伪图像协议和专家预测缓存接口稳定。
+
+## 9. 后续修正：Quito 官方切窗口径
+
+2026-06-06 23:31 已新增修正日志：
+
+```text
+experiment_logs/2026-06-06_2331_stage1_0_window_registry_quito_alignment.md
+```
+
+本日志中的默认配置 `stride=96` 和 “history/target 严格落在同一 split 内” 只能视为 coarse registry 口径，不再作为 Quito 官方兼容主口径。
+
+修正后的默认口径为：
+
+```text
+sample_stride=1
+split_context_policy=quito_overlap
+```
+
+含义：
+
+- 样本起点逐点滑动，对齐 Quito `TimeSeriesDataset.__len__` 的 `L - seq_len - forecast_horizon + 1`。
+- valid/test 的 target 落在当前 split 内，但 history 允许向前借 `history_len` 个上下文点。
+- 旧输出 `outputs/vision_ts_routing/window_registry/cfcd86e70e73/` 保留作对照或降采样消融，不再作为正式 Stage 1.1 主输入。
