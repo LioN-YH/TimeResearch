@@ -1,0 +1,35 @@
+# Python/cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Local environments
+.venv/
+.env
+.env.*
+
+# Data and generated artifacts
+data/
+outputs/
+*.parquet
+*.csv
+*.npy
+*.npz
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Nested upstream repository / external code checkout
+quito/
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
+
+# Logs generated outside the curated experiment log directory
+*.log
