@@ -14,6 +14,9 @@ from tools.quitobench_framework_expert_cache import (
     PatchTSTExpertConfig,
     RegistryWindowDataset,
     TSMixerExpertConfig,
+    WindowStandardizer,
+    apply_standardizer_to_series_maps,
+    build_train_split_standardizer,
     build_dlinear_cache_manifest,
     build_dlinear_prediction_table,
     build_patchtst_prediction_table,
@@ -87,6 +90,38 @@ def test_registry_window_dataset_keeps_requested_split_only() -> None:
     sample = dataset[0]
     assert sample["x"].shape == (8, 1)
     assert sample["y"].shape == (4, 1)
+
+
+def test_build_train_split_standardizer_uses_only_train_windows() -> None:
+    registry = _toy_registry()
+    histories, targets = _toy_histories_targets()
+
+    standardizer = build_train_split_standardizer(registry, histories, targets)
+
+    train_values = np.concatenate(
+        [
+            histories["w_1"],
+            targets["w_1"],
+            histories["w_2"],
+            targets["w_2"],
+        ]
+    )
+    expected_mean = float(np.mean(train_values))
+    expected_std = float(np.std(train_values) + 1e-8)
+    assert standardizer.mean == pytest.approx(expected_mean)
+    assert standardizer.std == pytest.approx(expected_std)
+    assert standardizer.scope == "train_split_global_window_values"
+
+
+def test_apply_standardizer_round_trips_histories_and_targets() -> None:
+    histories, targets = _toy_histories_targets()
+    standardizer = WindowStandardizer(mean=5.0, std=2.0, scope="test")
+
+    scaled_histories, scaled_targets = apply_standardizer_to_series_maps(histories, targets, standardizer)
+
+    assert scaled_histories["w_1"][0] == pytest.approx(-2.0)
+    restored = standardizer.inverse_transform(scaled_targets["w_1"])
+    np.testing.assert_allclose(restored, targets["w_1"])
 
 
 def test_build_dlinear_prediction_table_reuses_stage14a_schema() -> None:

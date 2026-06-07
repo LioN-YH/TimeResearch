@@ -54,6 +54,21 @@ TSMIXER_EXPERT_FAMILY = "mlp_mixer"
 
 
 @dataclass(frozen=True)
+class WindowStandardizer:
+    """Stage 1.4e wrapper-level train split standardizer."""
+
+    mean: float
+    std: float
+    scope: str
+
+    def transform(self, values: Sequence[float] | np.ndarray) -> np.ndarray:
+        return (np.asarray(values, dtype=np.float32) - np.float32(self.mean)) / np.float32(self.std)
+
+    def inverse_transform(self, values: Sequence[float] | np.ndarray) -> np.ndarray:
+        return np.asarray(values, dtype=np.float32) * np.float32(self.std) + np.float32(self.mean)
+
+
+@dataclass(frozen=True)
 class DLinearExpertConfig:
     """Stage 1.4b DLinear smoke 配置。"""
 
@@ -70,6 +85,44 @@ class DLinearExpertConfig:
     weight_decay: float = 0.0
     random_seed: int = 20260607
     soft_oracle_temperature: float = 1.0
+
+
+def build_train_split_standardizer(
+    registry: pd.DataFrame,
+    histories: Mapping[str, Sequence[float]],
+    targets: Mapping[str, Sequence[float]],
+) -> WindowStandardizer:
+    """用 train split 的 wrapper 窗口值估计全局 mean/std。"""
+
+    train_ids = registry.loc[registry["split"].astype(str) == "train", "physical_window_id"].astype(str).tolist()
+    if not train_ids:
+        raise ValueError("train-set standardizer 需要至少一个 train window")
+    values = [np.asarray(histories[physical_window_id], dtype=np.float32) for physical_window_id in train_ids]
+    values.extend(np.asarray(targets[physical_window_id], dtype=np.float32) for physical_window_id in train_ids)
+    merged = np.concatenate(values)
+    return WindowStandardizer(
+        mean=float(np.mean(merged)),
+        std=float(np.std(merged) + 1e-8),
+        scope="train_split_global_window_values",
+    )
+
+
+def apply_standardizer_to_series_maps(
+    histories: Mapping[str, Sequence[float]],
+    targets: Mapping[str, Sequence[float]],
+    standardizer: WindowStandardizer | None,
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+    """对 history/target 映射应用同一个 wrapper-level scaler。"""
+
+    if standardizer is None:
+        return (
+            {key: np.asarray(value, dtype=np.float32) for key, value in histories.items()},
+            {key: np.asarray(value, dtype=np.float32) for key, value in targets.items()},
+        )
+    return (
+        {key: standardizer.transform(value) for key, value in histories.items()},
+        {key: standardizer.transform(value) for key, value in targets.items()},
+    )
 
 
 @dataclass(frozen=True)
