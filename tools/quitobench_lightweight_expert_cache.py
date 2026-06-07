@@ -67,6 +67,7 @@ class LightweightExpertConfig:
     soft_oracle_temperature: float = 1.0
     eps: float = 1e-8
     random_seed: int = 20260607
+    seasonal_period_override: int | None = None
 
 
 def normalize_expert_ids(expert_ids: Sequence[str] | None = None) -> tuple[str, ...]:
@@ -163,7 +164,11 @@ def compute_lightweight_expert_predictions(
 
         expert_predictions = {
             "last_value": _last_value(history, pred_len),
-            "seasonal_naive": _seasonal_naive(history, pred_len, int(row.period)),
+            "seasonal_naive": _seasonal_naive(
+                history,
+                pred_len,
+                int(cfg.seasonal_period_override or row.period),
+            ),
             "recent_mean": _recent_mean(history, pred_len, cfg.recent_mean_fraction),
             "linear_trend": _linear_trend(history, pred_len),
         }
@@ -465,27 +470,46 @@ def load_registry(
 def extract_histories_and_targets(
     registry: pd.DataFrame,
     data_dir: Path = DEFAULT_DATA_DIR,
+    progress_every: int = 0,
 ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
     """按 registry 边界从 QuitoBench 数据中抽取 history 和 target。"""
 
     subsets = tuple(sorted(registry["subset"].astype(str).unique().tolist()))
+    start = time.perf_counter()
+    if progress_every > 0:
+        print(f"[stage] extract_histories start rows={len(registry)} subsets={list(subsets)}", flush=True)
     frames = load_subset_frames(data_dir, subsets)
+    if progress_every > 0:
+        print(f"[stage] extract_histories parquet_loaded elapsed={time.perf_counter() - start:.2f}s", flush=True)
+    item_frames_by_subset: dict[str, dict[int, pd.DataFrame]] = {}
+    for subset, frame in frames.items():
+        item_frames_by_subset[subset] = {
+            int(item_id): item_frame.sort_values("date_time").reset_index(drop=True)
+            for item_id, item_frame in frame.groupby("item_id", sort=True)
+        }
+    if progress_every > 0:
+        item_count = sum(len(item_frames) for item_frames in item_frames_by_subset.values())
+        print(
+            f"[stage] extract_histories item_lookup_ready items={item_count} "
+            f"elapsed={time.perf_counter() - start:.2f}s",
+            flush=True,
+        )
     histories: dict[str, np.ndarray] = {}
     targets: dict[str, np.ndarray] = {}
     frame_cache: dict[tuple[str, int], pd.DataFrame] = {}
     source_cache: dict[tuple[str, int, str], np.ndarray] = {}
-    for row in registry.itertuples(index=False):
+    for row_idx, row in enumerate(registry.itertuples(index=False), start=1):
         subset = str(row.subset)
         item_id = int(row.item_id)
         channel = str(row.channel)
         frame_key = (subset, item_id)
         if frame_key not in frame_cache:
-            if subset not in frames:
+            if subset not in item_frames_by_subset:
                 raise ValueError(f"缺少 subset 原始数据：{subset}")
-            item_frame = frames[subset][frames[subset]["item_id"] == item_id]
-            if item_frame.empty:
+            item_frame = item_frames_by_subset[subset].get(item_id)
+            if item_frame is None or item_frame.empty:
                 raise ValueError(f"原始数据缺少 {subset}/{item_id}")
-            frame_cache[frame_key] = item_frame.sort_values("date_time").reset_index(drop=True)
+            frame_cache[frame_key] = item_frame
         source_key = (subset, item_id, channel)
         if source_key not in source_cache:
             ordered = frame_cache[frame_key]
@@ -501,6 +525,16 @@ def extract_histories_and_targets(
             raise ValueError(f"{row.physical_window_id} target 长度 {len(target)} != {int(row.pred_len)}")
         histories[str(row.physical_window_id)] = history
         targets[str(row.physical_window_id)] = target
+        if progress_every > 0 and row_idx % int(progress_every) == 0:
+            print(
+                "[progress] extract_histories "
+                f"rows={row_idx}/{len(registry)} "
+                f"items_cached={len(frame_cache)} series_cached={len(source_cache)} "
+                f"elapsed={time.perf_counter() - start:.2f}s",
+                flush=True,
+            )
+    if progress_every > 0:
+        print(f"[stage] extract_histories done elapsed={time.perf_counter() - start:.2f}s", flush=True)
     return histories, targets
 
 
@@ -524,6 +558,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--recent-mean-fraction", type=float, default=0.25)
     parser.add_argument("--soft-oracle-temperature", type=float, default=1.0)
+    parser.add_argument("--seasonal-period-override", type=int, default=None)
     return parser.parse_args()
 
 
@@ -533,6 +568,7 @@ def main() -> None:
         expert_set_id=args.expert_set_id,
         recent_mean_fraction=args.recent_mean_fraction,
         soft_oracle_temperature=args.soft_oracle_temperature,
+        seasonal_period_override=args.seasonal_period_override,
     )
     start = time.perf_counter()
     expert_ids = normalize_expert_ids(tuple(expert_id.strip() for expert_id in args.expert_ids.split(",") if expert_id.strip()))

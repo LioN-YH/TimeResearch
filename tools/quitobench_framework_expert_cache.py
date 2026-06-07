@@ -11,7 +11,7 @@ import argparse
 import json
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -208,10 +208,14 @@ def _quito_dataset_lookup(dataset: TimeSeriesDataset) -> tuple[dict[int, int], d
 def extract_quito_standardized_series_maps(
     registry: pd.DataFrame,
     data_dir: Path,
+    progress_every: int = 0,
 ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, np.ndarray], dict[str, QuitoWindowScaler], dict[str, object]]:
     """复用 Quito TimeSeriesDataset 的 train 段 scaler，并按 registry 抽取窗口。"""
 
+    start = time.perf_counter()
     validate_registry(registry)
+    if progress_every > 0:
+        print(f"[stage] quito_standardize start rows={len(registry)}", flush=True)
     history_lens = registry["history_len"].astype(int).unique()
     pred_lens = registry["pred_len"].astype(int).unique()
     if len(history_lens) != 1 or len(pred_lens) != 1:
@@ -225,12 +229,20 @@ def extract_quito_standardized_series_maps(
     dataset_cache: dict[str, TimeSeriesDataset] = {}
     lookup_cache: dict[str, tuple[dict[int, int], dict[str, int], dict[int, pd.DataFrame]]] = {}
 
-    for row in registry.itertuples(index=False):
+    for row_idx, row in enumerate(registry.itertuples(index=False), start=1):
         subset = str(row.subset)
         if subset not in dataset_cache:
+            if progress_every > 0:
+                print(f"[stage] quito_standardize build_dataset subset={subset}", flush=True)
             dataset = _make_quito_dataset_for_subset(subset, data_dir=data_dir, seq_len=seq_len, pred_len=pred_len)
             dataset_cache[subset] = dataset
             lookup_cache[subset] = _quito_dataset_lookup(dataset)
+            if progress_every > 0:
+                print(
+                    f"[stage] quito_standardize dataset_ready subset={subset} "
+                    f"elapsed={time.perf_counter() - start:.2f}s",
+                    flush=True,
+                )
         dataset = dataset_cache[subset]
         item_pos, channel_pos, item_frames = lookup_cache[subset]
         physical_window_id = str(row.physical_window_id)
@@ -259,6 +271,14 @@ def extract_quito_standardized_series_maps(
         targets[physical_window_id] = scaler.transform(target)
         raw_targets[physical_window_id] = target.astype(float)
         scalers[physical_window_id] = scaler
+        if progress_every > 0 and row_idx % int(progress_every) == 0:
+            print(
+                "[progress] quito_standardize "
+                f"rows={row_idx}/{len(registry)} "
+                f"subsets_cached={len(dataset_cache)} "
+                f"elapsed={time.perf_counter() - start:.2f}s",
+                flush=True,
+            )
 
     summary = {
         "enabled": True,
@@ -271,6 +291,8 @@ def extract_quito_standardized_series_maps(
         "subsets": sorted(dataset_cache.keys()),
         "num_window_scalers": int(len(scalers)),
     }
+    if progress_every > 0:
+        print(f"[stage] quito_standardize done elapsed={time.perf_counter() - start:.2f}s", flush=True)
     return histories, targets, raw_targets, scalers, summary
 
 
@@ -292,6 +314,7 @@ def prepare_model_series_maps(
     registry: pd.DataFrame,
     data_dir: Path,
     train_set_standardize: bool,
+    progress_every: int = 0,
 ) -> tuple[
     dict[str, np.ndarray],
     dict[str, np.ndarray],
@@ -305,9 +328,14 @@ def prepare_model_series_maps(
         model_histories, model_targets, raw_targets, scalers, summary = extract_quito_standardized_series_maps(
             registry,
             data_dir=data_dir,
+            progress_every=progress_every,
         )
         return model_histories, model_targets, raw_targets, scalers, summary
-    raw_histories, raw_targets = extract_histories_and_targets(registry, data_dir=data_dir)
+    raw_histories, raw_targets = extract_histories_and_targets(
+        registry,
+        data_dir=data_dir,
+        progress_every=progress_every,
+    )
     model_histories, model_targets = apply_standardizer_to_series_maps(raw_histories, raw_targets, None)
     return model_histories, model_targets, raw_targets, None, {"enabled": False}
 
@@ -493,6 +521,7 @@ def _train_model(
     num_workers: int,
     random_seed: int,
     device: str,
+    progress_every: int = 0,
 ) -> dict[str, object]:
     torch.manual_seed(random_seed)
     np.random.seed(random_seed)
@@ -519,8 +548,15 @@ def _train_model(
 
     losses: list[float] = []
     start = time.perf_counter()
-    for _ in range(epochs):
-        for batch in loader:
+    if progress_every > 0:
+        print(
+            f"[stage] train start windows={len(train_dataset)} batches_per_epoch={len(loader)} "
+            f"epochs={epochs} device={device}",
+            flush=True,
+        )
+    global_step = 0
+    for epoch_idx in range(epochs):
+        for batch_idx, batch in enumerate(loader, start=1):
             x = batch["x"].to(device)
             y = batch["y"].to(device)
             optimizer.zero_grad(set_to_none=True)
@@ -528,8 +564,19 @@ def _train_model(
             loss.backward()
             optimizer.step()
             losses.append(float(loss.detach().cpu()))
+            global_step += 1
+            if progress_every > 0 and global_step % int(progress_every) == 0:
+                print(
+                    "[progress] train "
+                    f"epoch={epoch_idx + 1}/{epochs} batch={batch_idx}/{len(loader)} "
+                    f"step={global_step} loss={losses[-1]:.6g} "
+                    f"elapsed={time.perf_counter() - start:.2f}s",
+                    flush=True,
+                )
         if lr_scheduler is not None:
             lr_scheduler.step()
+    if progress_every > 0:
+        print(f"[stage] train done elapsed={time.perf_counter() - start:.2f}s", flush=True)
     elapsed = time.perf_counter() - start
     return {
         "train_windows": int(len(train_dataset)),
@@ -551,6 +598,7 @@ def train_quito_dlinear_model(
     targets: Mapping[str, Sequence[float]],
     config: DLinearExpertConfig | None = None,
     device: str = "cpu",
+    progress_every: int = 0,
 ) -> tuple[DLinear, dict[str, object]]:
     """只使用 train split 训练 Quito DLinear。"""
 
@@ -571,6 +619,7 @@ def train_quito_dlinear_model(
         num_workers=cfg.num_workers,
         random_seed=cfg.random_seed,
         device=device,
+        progress_every=progress_every,
     )
     return model, stats
 
@@ -581,6 +630,7 @@ def train_quito_patchtst_model(
     targets: Mapping[str, Sequence[float]],
     config: PatchTSTExpertConfig | None = None,
     device: str = "cpu",
+    progress_every: int = 0,
 ) -> tuple[PatchTST, dict[str, object]]:
     """只使用 train split 训练 Quito PatchTST。"""
 
@@ -601,6 +651,7 @@ def train_quito_patchtst_model(
         num_workers=cfg.num_workers,
         random_seed=cfg.random_seed,
         device=device,
+        progress_every=progress_every,
     )
     return model, stats
 
@@ -611,6 +662,7 @@ def train_quito_tsmixer_model(
     targets: Mapping[str, Sequence[float]],
     config: TSMixerExpertConfig | None = None,
     device: str = "cpu",
+    progress_every: int = 0,
 ) -> tuple[TSMixer, dict[str, object]]:
     """只使用 train split 训练 Quito TSMixer。"""
 
@@ -631,6 +683,7 @@ def train_quito_tsmixer_model(
         num_workers=cfg.num_workers,
         random_seed=cfg.random_seed,
         device=device,
+        progress_every=progress_every,
     )
     return model, stats
 
@@ -643,6 +696,7 @@ def predict_with_model(
     config: DLinearExpertConfig | PatchTSTExpertConfig | TSMixerExpertConfig | None = None,
     device: str = "cpu",
     output_standardizer: WindowStandardizer | None = None,
+    progress_every: int = 0,
 ) -> dict[str, np.ndarray]:
     cfg = config or DLinearExpertConfig()
     dataset = RegistryWindowDataset(registry, histories, targets)
@@ -650,8 +704,13 @@ def predict_with_model(
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, drop_last=False, num_workers=cfg.num_workers)
     predictions: dict[str, np.ndarray] = {}
     model.eval()
+    start = time.perf_counter()
+    if progress_every > 0:
+        print(f"[stage] predict start windows={len(dataset)} batches={len(loader)} device={device}", flush=True)
+    batch_count = 0
     with torch.no_grad():
         for batch in loader:
+            batch_count += 1
             x = batch["x"].to(device)
             yhat = model.predict(x=x, y=None).detach().cpu().numpy()
             ids = [str(value) for value in batch["physical_window_id"]]
@@ -660,6 +719,14 @@ def predict_with_model(
                 if output_standardizer is not None:
                     values = output_standardizer.inverse_transform(values)
                 predictions[physical_window_id] = values.astype(float)
+            if progress_every > 0 and batch_count % int(progress_every) == 0:
+                print(
+                    f"[progress] predict batches={batch_count}/{len(loader)} "
+                    f"predictions={len(predictions)} elapsed={time.perf_counter() - start:.2f}s",
+                    flush=True,
+                )
+    if progress_every > 0:
+        print(f"[stage] predict done elapsed={time.perf_counter() - start:.2f}s", flush=True)
     return predictions
 
 
@@ -910,12 +977,20 @@ def _select_device(requested: str) -> str:
     return "cpu"
 
 
+def _infer_window_lengths(registry: pd.DataFrame) -> tuple[int, int]:
+    history_lens = sorted(registry["history_len"].astype(int).unique().tolist())
+    pred_lens = sorted(registry["pred_len"].astype(int).unique().tolist())
+    if len(history_lens) != 1 or len(pred_lens) != 1:
+        raise ValueError(f"registry 必须只有一种 history_len/pred_len：{history_lens}/{pred_lens}")
+    return int(history_lens[0]), int(pred_lens[0])
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--expert-model", choices=("dlinear", "patchtst", "tsmixer"), default="dlinear")
     parser.add_argument("--registry-dir", type=Path, default=DEFAULT_REGISTRY_DIR)
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data/hf/hq-bench/quitobench/revisions/17362dcb/v20260315")
-    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--output-root", type=Path, default=None)
     parser.add_argument("--expert-set-id", default="dlinear_v1__smoke")
     parser.add_argument("--max-rows", type=int, default=None)
     parser.add_argument("--stratified-rows", type=int, default=None)
@@ -931,6 +1006,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scheduler", choices=("none", "cosine"), default="none")
     parser.add_argument("--eta-min", type=float, default=1e-5)
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--seq-len", type=int, default=None)
+    parser.add_argument("--pred-len", type=int, default=None)
     parser.add_argument("--kernel-size", type=int, default=25)
     parser.add_argument("--patch-len", type=int, default=16)
     parser.add_argument("--stride", type=int, default=8)
@@ -946,6 +1023,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--revin", dest="revin", action="store_true", default=True)
     parser.add_argument("--no-revin", dest="revin", action="store_false")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--progress-every", type=int, default=0)
     return parser.parse_args()
 
 
@@ -1012,7 +1090,11 @@ def main() -> None:
         )
     start = time.perf_counter()
     load_max_rows = None if args.stratified_rows is not None else args.max_rows
+    if args.progress_every > 0:
+        print(f"[stage] load_registry start dir={args.registry_dir}", flush=True)
     registry, registry_manifest = load_registry(args.registry_dir, max_rows=load_max_rows)
+    if args.progress_every > 0:
+        print(f"[stage] load_registry done rows={len(registry)} elapsed={time.perf_counter() - start:.2f}s", flush=True)
     sampling_summary: dict[str, object]
     if args.stratified_rows is not None:
         stratify_cols = tuple(col.strip() for col in args.stratify_cols.split(",") if col.strip())
@@ -1029,6 +1111,12 @@ def main() -> None:
             "group_cols": list(stratify_cols),
             "group_count": int(registry.groupby(list(stratify_cols))["physical_window_id"].nunique().shape[0]),
         }
+        if args.progress_every > 0:
+            print(
+                f"[stage] stratified_sample done rows={len(registry)} "
+                f"elapsed={time.perf_counter() - start:.2f}s",
+                flush=True,
+            )
     else:
         sampling_summary = {
             "strategy": "head" if args.max_rows is not None else "full",
@@ -1042,11 +1130,31 @@ def main() -> None:
         validate_registry(registry)
         sampling_summary["max_train_windows"] = int(args.max_train_windows)
         sampling_summary["selected_rows_after_train_cap"] = int(len(registry))
+    inferred_seq_len, inferred_pred_len = _infer_window_lengths(registry)
+    config = replace(
+        config,
+        seq_len=int(args.seq_len or inferred_seq_len),
+        pred_len=int(args.pred_len or inferred_pred_len),
+    )
+    if config.seq_len != inferred_seq_len or config.pred_len != inferred_pred_len:
+        raise ValueError(
+            "模型窗口长度必须匹配 registry："
+            f"config=({config.seq_len},{config.pred_len}) registry=({inferred_seq_len},{inferred_pred_len})"
+        )
+    if args.progress_every > 0:
+        print(f"[stage] model_window_lengths seq_len={config.seq_len} pred_len={config.pred_len}", flush=True)
+    sample_set_ids = sorted(registry["sample_set_id"].astype(str).unique().tolist())
+    if len(sample_set_ids) != 1:
+        raise ValueError(f"单次 expert cache 只支持一个 sample_set_id：{sample_set_ids}")
+    output_root = args.output_root or (DEFAULT_OUTPUT_ROOT.parent / sample_set_ids[0])
     model_histories, model_targets, targets, prediction_scalers, standardization_summary = prepare_model_series_maps(
         registry,
         data_dir=args.data_dir,
         train_set_standardize=config.train_set_standardize,
+        progress_every=args.progress_every,
     )
+    if args.progress_every > 0:
+        print(f"[stage] prepare_model_series done elapsed={time.perf_counter() - start:.2f}s", flush=True)
     device = _select_device(args.device)
     if args.expert_model == "patchtst":
         model, training_stats = train_quito_patchtst_model(
@@ -1055,6 +1163,7 @@ def main() -> None:
             model_targets,
             config=config,
             device=device,
+            progress_every=args.progress_every,
         )
     elif args.expert_model == "tsmixer":
         model, training_stats = train_quito_tsmixer_model(
@@ -1063,6 +1172,7 @@ def main() -> None:
             model_targets,
             config=config,
             device=device,
+            progress_every=args.progress_every,
         )
     else:
         model, training_stats = train_quito_dlinear_model(
@@ -1071,6 +1181,7 @@ def main() -> None:
             model_targets,
             config=config,
             device=device,
+            progress_every=args.progress_every,
         )
     prediction_map = predict_with_model(
         model,
@@ -1079,7 +1190,10 @@ def main() -> None:
         model_targets,
         config=config,
         device=device,
+        progress_every=args.progress_every,
     )
+    if args.progress_every > 0:
+        print(f"[stage] build_outputs start elapsed={time.perf_counter() - start:.2f}s", flush=True)
     if prediction_scalers is not None:
         prediction_map = inverse_transform_prediction_map(prediction_map, prediction_scalers)
     predictions = (
@@ -1119,7 +1233,7 @@ def main() -> None:
         oracle_summary=oracle_summary,
         cell_model_matrix=cell_model_matrix,
         manifest=manifest,
-        output_root=args.output_root,
+        output_root=output_root,
         expert_set_id=args.expert_set_id,
     )
     print(f"[done] output_dir={out_dir}")
