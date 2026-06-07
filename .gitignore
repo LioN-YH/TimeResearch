@@ -10,6 +10,7 @@ __pycache__/
 .venv/
 .env
 .env.*
+.worktrees/
 
 # Data and generated artifacts
 data/
