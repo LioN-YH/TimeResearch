@@ -1,5 +1,7 @@
 # Stage 1.4e：PatchTST 官方口径对齐与尺度审计
 
+> 后续修正：本日志中的 `train-set standardize` 使用 wrapper-level 全局 scaler，只用于定位尺度/训练口径问题。正式复用 Quito `TimeSeriesDataset` 的 per item/channel train 段 scaler 结果见 `2026-06-07_2000_stage1_4f_quito_dataset_scaler_alignment.md`。
+
 ## 1. 目的
 
 Stage 1.4c/1.4d 中 PatchTST 在当前 runner 下出现异常大预测误差，与 QuitoBench 论文中 PatchTST 通常优于 DLinear 的经验不一致。本阶段检查问题是否来自输入尺度、输出尺度、训练预算或官方训练参数未对齐。
