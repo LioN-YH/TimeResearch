@@ -86,7 +86,106 @@ models = DLinear / PatchTST / TSMixer
 
 随后根据 5 epoch 的趋势决定是否补 20 epoch。
 
-## 5. 输出命名
+## 5. 训练参数明细
+
+当前 `tools/quitobench_framework_expert_cache.py` 的训练入口使用统一 sample-channel 口径：
+
+| 参数 | 当前值 |
+| --- | --- |
+| 输入长度 | `seq_len=192` |
+| 预测长度 | `pred_len=96` |
+| 输入通道 | `enc_in=1` |
+| 输出通道 | `c_out=1` |
+| 训练 split | 仅 `train` |
+| 预测 split | `train/valid/test` 全部输出 |
+| loss | Quito 模型内置 `mse` |
+| optimizer | `torch.optim.Adam` |
+| learning rate | 默认 `0.001` |
+| weight decay | 默认 `0.0` |
+| batch shuffle | train loader `shuffle=True` |
+| drop last | `False` |
+| random seed | `20260607` |
+| soft oracle temperature | `1.0` |
+| RevIN | 三个模型当前均为 `revin=True` |
+
+当前没有启用：
+
+- validation early stopping；
+- learning rate scheduler；
+- gradient clipping；
+- AMP/mixed precision；
+- DDP 或 DataParallel；
+- OOF；
+- 单独归一化 sweep 参数。
+
+因此 Stage 1.4c 的第一版应把这些限制写进日志，避免把结果误读为充分调参后的模型能力。
+
+### 5.1 DLinear 参数
+
+| 参数 | 当前值 |
+| --- | --- |
+| source model | `quito.models.dlinear.DLinear` |
+| expert id | `dlinear_quito` |
+| family | `decomposition_linear` |
+| `kernel_size` | `25` |
+| `individual` | `False` |
+| `revin` | `True` |
+
+### 5.2 PatchTST 参数
+
+| 参数 | 当前值 |
+| --- | --- |
+| source model | `quito.models.patchtst.PatchTST` |
+| expert id | `patchtst_quito` |
+| family | `patch_transformer` |
+| `patch_len` | `16` |
+| `stride` | `8` |
+| `d_model` | `128` |
+| `d_ff` | `256` |
+| `n_heads` | `4` |
+| `e_layers` | `2` |
+| `dropout` | `0.05` |
+| `fc_dropout` | `0.05` |
+| `head_dropout` | `0.0` |
+| `revin` | `True` |
+
+### 5.3 TSMixer 参数
+
+| 参数 | 当前值 |
+| --- | --- |
+| source model | `quito.models.tsmixer.TSMixer` |
+| expert id | `tsmixer_quito` |
+| family | `mlp_mixer` |
+| `num_blocks` | `2` |
+| `d_ff` | Stage 1.4b smoke 使用 `64` |
+| `norm_type` | `layer` |
+| `dropout` | `0.1` |
+| `revin` | `True` |
+
+注意：CLI 的 `--d-ff` 默认值是 `256`，但 Stage 1.4b TSMixer smoke 命令显式使用 `--d-ff 64`。Stage 1.4c 需要固定该值，并在所有 TSMixer `expert_set_id` 和 manifest 中保持可追踪。
+
+## 6. 多 GPU 执行策略
+
+当前 runner 内部会把 `--device cuda` 映射到当前可见设备的 `cuda:0`。因此多 GPU 并行不需要先改训练代码，可以用多个 shell 进程分发不同实验组合：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 conda run -n quito python tools/quitobench_framework_expert_cache.py --expert-model dlinear  --stratified-rows 50000 --epochs 1 --batch-size 128 --expert-set-id dlinear_v1__stratified_50k_cuda_e1 --device cuda
+CUDA_VISIBLE_DEVICES=1 conda run -n quito python tools/quitobench_framework_expert_cache.py --expert-model patchtst --stratified-rows 50000 --epochs 1 --batch-size 128 --expert-set-id patchtst_v1__stratified_50k_cuda_e1 --device cuda
+CUDA_VISIBLE_DEVICES=2 conda run -n quito python tools/quitobench_framework_expert_cache.py --expert-model tsmixer  --stratified-rows 50000 --epochs 1 --batch-size 128 --expert-set-id tsmixer_v1__stratified_50k_cuda_e1 --device cuda --num-blocks 2 --d-ff 64 --norm-type layer
+```
+
+建议第一轮按 GPU 拆模型：
+
+| GPU | 第一轮 |
+| --- | --- |
+| GPU 0 | DLinear `e1/e5` |
+| GPU 1 | PatchTST `e1/e5` |
+| GPU 2 | TSMixer `e1/e5` |
+| GPU 3 | 预留给失败重跑、耗时监控或后续 `e20` |
+
+如果单个模型显存很低，也可以把不同 epoch 组合进一步并行。但必须避免两个进程写同一个 `expert_set_id` 输出目录。
+
+## 7. 输出命名
 
 所有输出继续落在：
 
@@ -135,7 +234,7 @@ budget_calibration_50k_e5__seasonal_naive_dlinear_patchtst_tsmixer
 budget_calibration_50k_e20__seasonal_naive_dlinear_patchtst_tsmixer
 ```
 
-## 6. 指标
+## 8. 指标
 
 Stage 1.4c 至少报告以下指标：
 
@@ -158,7 +257,7 @@ Stage 1.4c 至少报告以下指标：
 3. oracle gap 是否随训练预算增加而扩大；
 4. neural experts 的贡献是否足以支撑后续 OOF 训练成本。
 
-## 7. 与 OOF cache 的关系
+## 9. 与 OOF cache 的关系
 
 OOF cache 暂不在 Stage 1.4c 实现。
 
@@ -169,7 +268,7 @@ Stage 1.4c 的判断逻辑是：
 - 如果 50k + 更高 epoch 后，PatchTST/DLinear/TSMixer 的 oracle top1 和 cell-level 贡献明显上升，则进入 OOF cache 设计。
 - 如果 neural experts 仍然整体弱且互补性有限，则先重读 TimeFuse、QuitoBench、TimeRecipe、VisMoE 等工作，重新选择覆盖不同结构模式的专家池。
 
-## 8. 停止条件
+## 10. 停止条件
 
 本阶段完成条件：
 
@@ -184,11 +283,11 @@ Stage 1.4c 的判断逻辑是：
 
 如果 50k 运行耗时或显存不可接受，则降级为 20k，但必须在日志中说明降级原因，并保留同一 stratified 口径。
 
-## 9. 风险与约束
+## 11. 风险与约束
 
 - 50k x 多模型 x 多 epoch 可能需要较长 GPU 时间，应先跑一个模型的 `epochs=1` 做耗时估计。
 - 如果 runner 训练只使用 train split，50k stratified 的实际 train 数量仍小于 50k，需要在日志中报告 train/valid/test 分布。
 - 如果不同 run 的 stratified sample 不一致，comparison 会变得难解释；必须确保同一 sample selection 或在 comparison 中只取共同 `physical_window_id`。
 - 如果归一化策略需要新增代码，必须先写测试，且不改变 Stage 1.4b 历史输出语义。
 - 如果 neural experts 在 train 上明显变好但 valid/test 不变好，应优先怀疑过拟合，而不是直接进入 gate。
-
+- 多 GPU 并行时每个进程必须使用不同 `expert_set_id`，并在日志中记录 `CUDA_VISIBLE_DEVICES` 与实际 manifest 中的 `device`。
