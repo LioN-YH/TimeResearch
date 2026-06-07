@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Mapping, Sequence
 
 import numpy as np
 import pandas as pd
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from tools.quitobench_lightweight_expert_cache import (
     DEFAULT_REGISTRY_DIR,
@@ -16,7 +21,6 @@ from tools.quitobench_lightweight_expert_cache import (
     load_registry,
 )
 
-ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = ROOT / "data/hf/hq-bench/quitobench/revisions/17362dcb/v20260315"
 
 

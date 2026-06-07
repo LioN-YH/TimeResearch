@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -29,3 +33,18 @@ def test_summarize_prediction_scale_reports_prediction_target_and_error_stats() 
     assert summary["target"]["min"] == pytest.approx(1.5)
     assert summary["absolute_error"]["max"] == pytest.approx(1.0)
     assert summary["finite_prediction_rate"] == pytest.approx(1.0)
+
+
+def test_diagnostics_script_help_runs_when_invoked_by_path() -> None:
+    root = Path(__file__).resolve().parents[1]
+
+    result = subprocess.run(
+        [sys.executable, "tools/quitobench_expert_prediction_diagnostics.py", "--help"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "--cache-dir" in result.stdout
