@@ -22,6 +22,7 @@ from tools.quitobench_framework_expert_cache import (
     build_patchtst_prediction_table,
     build_tsmixer_prediction_table,
     parse_args,
+    predict_with_model,
     select_stratified_registry,
     train_quito_patchtst_model,
     train_quito_dlinear_model,
@@ -352,6 +353,60 @@ def test_tsmixer_config_can_disable_revin_and_override_dropout() -> None:
     assert config.revin is False
     assert config.dropout == pytest.approx(0.2)
     assert config.weight_decay == pytest.approx(0.01)
+
+
+def test_parse_args_exposes_stage14e_alignment_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "prog",
+            "--train-set-standardize",
+            "--drop-last",
+            "--scheduler",
+            "cosine",
+            "--eta-min",
+            "0.00001",
+            "--num-workers",
+            "2",
+            "--eval-batch-size",
+            "64",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.train_set_standardize is True
+    assert args.drop_last is True
+    assert args.scheduler == "cosine"
+    assert args.eta_min == pytest.approx(0.00001)
+    assert args.num_workers == 2
+    assert args.eval_batch_size == 64
+
+
+def test_predict_with_model_inverse_transforms_standardized_predictions() -> None:
+    class EchoLastModel:
+        def eval(self) -> None:
+            return None
+
+        def predict(self, x, y=None):
+            return x[:, -4:, :]
+
+    registry = _toy_registry().iloc[[0]].copy()
+    histories, targets = _toy_histories_targets()
+    standardizer = WindowStandardizer(mean=10.0, std=2.0, scope="test")
+    scaled_histories, scaled_targets = apply_standardizer_to_series_maps(histories, targets, standardizer)
+
+    predictions = predict_with_model(
+        EchoLastModel(),
+        registry,
+        scaled_histories,
+        scaled_targets,
+        config=DLinearExpertConfig(seq_len=8, pred_len=4, batch_size=1),
+        device="cpu",
+        output_standardizer=standardizer,
+    )
+
+    np.testing.assert_allclose(predictions["w_1"], histories["w_1"][-4:])
 
 
 def test_parse_args_exposes_stage14d_diagnostic_flags(monkeypatch: pytest.MonkeyPatch) -> None:

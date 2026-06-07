@@ -83,6 +83,12 @@ class DLinearExpertConfig:
     batch_size: int = 32
     learning_rate: float = 0.001
     weight_decay: float = 0.0
+    train_set_standardize: bool = False
+    drop_last: bool = False
+    scheduler: str = "none"
+    eta_min: float = 1e-5
+    num_workers: int = 0
+    eval_batch_size: int | None = None
     random_seed: int = 20260607
     soft_oracle_temperature: float = 1.0
 
@@ -147,6 +153,12 @@ class PatchTSTExpertConfig:
     batch_size: int = 32
     learning_rate: float = 0.001
     weight_decay: float = 0.0
+    train_set_standardize: bool = False
+    drop_last: bool = False
+    scheduler: str = "none"
+    eta_min: float = 1e-5
+    num_workers: int = 0
+    eval_batch_size: int | None = None
     random_seed: int = 20260607
     soft_oracle_temperature: float = 1.0
 
@@ -168,6 +180,12 @@ class TSMixerExpertConfig:
     batch_size: int = 32
     learning_rate: float = 0.001
     weight_decay: float = 0.0
+    train_set_standardize: bool = False
+    drop_last: bool = False
+    scheduler: str = "none"
+    eta_min: float = 1e-5
+    num_workers: int = 0
+    eval_batch_size: int | None = None
     random_seed: int = 20260607
     soft_oracle_temperature: float = 1.0
 
@@ -280,7 +298,7 @@ def _make_tsmixer_model(config: TSMixerExpertConfig, device: str) -> TSMixer:
 
 
 def _train_model(
-    model: DLinear | PatchTST,
+    model: DLinear | PatchTST | TSMixer,
     registry: pd.DataFrame,
     histories: Mapping[str, Sequence[float]],
     targets: Mapping[str, Sequence[float]],
@@ -288,6 +306,10 @@ def _train_model(
     batch_size: int,
     learning_rate: float,
     weight_decay: float,
+    drop_last: bool,
+    scheduler: str,
+    eta_min: float,
+    num_workers: int,
     random_seed: int,
     device: str,
 ) -> dict[str, object]:
@@ -296,8 +318,23 @@ def _train_model(
     train_dataset = RegistryWindowDataset(registry, histories, targets, split="train", require_train_split=True)
     if len(train_dataset) == 0:
         raise ValueError("训练型专家 smoke 缺少 train split 窗口")
-    loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=False)
+    loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        drop_last=drop_last,
+        num_workers=num_workers,
+    )
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    lr_scheduler = None
+    if scheduler == "cosine":
+        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=max(epochs, 1),
+            eta_min=eta_min,
+        )
+    elif scheduler != "none":
+        raise ValueError(f"不支持的 scheduler：{scheduler}")
 
     losses: list[float] = []
     start = time.perf_counter()
@@ -310,6 +347,8 @@ def _train_model(
             loss.backward()
             optimizer.step()
             losses.append(float(loss.detach().cpu()))
+        if lr_scheduler is not None:
+            lr_scheduler.step()
     elapsed = time.perf_counter() - start
     return {
         "train_windows": int(len(train_dataset)),
@@ -317,6 +356,11 @@ def _train_model(
         "epochs_completed": int(epochs),
         "final_train_loss": float(losses[-1]) if losses else np.nan,
         "train_elapsed_seconds": float(elapsed),
+        "drop_last": bool(drop_last),
+        "scheduler": scheduler,
+        "eta_min": float(eta_min),
+        "num_workers": int(num_workers),
+        "final_learning_rate": float(optimizer.param_groups[0]["lr"]),
     }
 
 
@@ -340,6 +384,10 @@ def train_quito_dlinear_model(
         batch_size=cfg.batch_size,
         learning_rate=cfg.learning_rate,
         weight_decay=cfg.weight_decay,
+        drop_last=cfg.drop_last,
+        scheduler=cfg.scheduler,
+        eta_min=cfg.eta_min,
+        num_workers=cfg.num_workers,
         random_seed=cfg.random_seed,
         device=device,
     )
@@ -366,6 +414,10 @@ def train_quito_patchtst_model(
         batch_size=cfg.batch_size,
         learning_rate=cfg.learning_rate,
         weight_decay=cfg.weight_decay,
+        drop_last=cfg.drop_last,
+        scheduler=cfg.scheduler,
+        eta_min=cfg.eta_min,
+        num_workers=cfg.num_workers,
         random_seed=cfg.random_seed,
         device=device,
     )
@@ -392,6 +444,10 @@ def train_quito_tsmixer_model(
         batch_size=cfg.batch_size,
         learning_rate=cfg.learning_rate,
         weight_decay=cfg.weight_decay,
+        drop_last=cfg.drop_last,
+        scheduler=cfg.scheduler,
+        eta_min=cfg.eta_min,
+        num_workers=cfg.num_workers,
         random_seed=cfg.random_seed,
         device=device,
     )
@@ -399,16 +455,18 @@ def train_quito_tsmixer_model(
 
 
 def predict_with_model(
-    model: DLinear,
+    model: DLinear | PatchTST | TSMixer,
     registry: pd.DataFrame,
     histories: Mapping[str, Sequence[float]],
     targets: Mapping[str, Sequence[float]],
-    config: DLinearExpertConfig | None = None,
+    config: DLinearExpertConfig | PatchTSTExpertConfig | TSMixerExpertConfig | None = None,
     device: str = "cpu",
+    output_standardizer: WindowStandardizer | None = None,
 ) -> dict[str, np.ndarray]:
     cfg = config or DLinearExpertConfig()
     dataset = RegistryWindowDataset(registry, histories, targets)
-    loader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=False, drop_last=False)
+    batch_size = cfg.eval_batch_size or cfg.batch_size
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, drop_last=False, num_workers=cfg.num_workers)
     predictions: dict[str, np.ndarray] = {}
     model.eval()
     with torch.no_grad():
@@ -417,7 +475,10 @@ def predict_with_model(
             yhat = model.predict(x=x, y=None).detach().cpu().numpy()
             ids = [str(value) for value in batch["physical_window_id"]]
             for physical_window_id, pred in zip(ids, yhat, strict=True):
-                predictions[physical_window_id] = pred[:, 0].astype(float)
+                values = pred[:, 0].astype(np.float32)
+                if output_standardizer is not None:
+                    values = output_standardizer.inverse_transform(values)
+                predictions[physical_window_id] = values.astype(float)
     return predictions
 
 
@@ -681,8 +742,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-train-windows", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--eval-batch-size", type=int, default=None)
     parser.add_argument("--learning-rate", type=float, default=0.001)
     parser.add_argument("--weight-decay", type=float, default=0.0)
+    parser.add_argument("--train-set-standardize", action="store_true", default=False)
+    parser.add_argument("--drop-last", action="store_true", default=False)
+    parser.add_argument("--scheduler", choices=("none", "cosine"), default="none")
+    parser.add_argument("--eta-min", type=float, default=1e-5)
+    parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--kernel-size", type=int, default=25)
     parser.add_argument("--patch-len", type=int, default=16)
     parser.add_argument("--stride", type=int, default=8)
@@ -708,8 +775,14 @@ def main() -> None:
             expert_set_id=args.expert_set_id,
             epochs=args.epochs,
             batch_size=args.batch_size,
+            eval_batch_size=args.eval_batch_size,
             learning_rate=args.learning_rate,
             weight_decay=args.weight_decay,
+            train_set_standardize=args.train_set_standardize,
+            drop_last=args.drop_last,
+            scheduler=args.scheduler,
+            eta_min=args.eta_min,
+            num_workers=args.num_workers,
             patch_len=args.patch_len,
             stride=args.stride,
             d_model=args.d_model,
@@ -726,8 +799,14 @@ def main() -> None:
             expert_set_id=args.expert_set_id,
             epochs=args.epochs,
             batch_size=args.batch_size,
+            eval_batch_size=args.eval_batch_size,
             learning_rate=args.learning_rate,
             weight_decay=args.weight_decay,
+            train_set_standardize=args.train_set_standardize,
+            drop_last=args.drop_last,
+            scheduler=args.scheduler,
+            eta_min=args.eta_min,
+            num_workers=args.num_workers,
             num_blocks=args.num_blocks,
             d_ff=args.d_ff,
             norm_type=args.norm_type,
@@ -739,8 +818,14 @@ def main() -> None:
             expert_set_id=args.expert_set_id,
             epochs=args.epochs,
             batch_size=args.batch_size,
+            eval_batch_size=args.eval_batch_size,
             learning_rate=args.learning_rate,
             weight_decay=args.weight_decay,
+            train_set_standardize=args.train_set_standardize,
+            drop_last=args.drop_last,
+            scheduler=args.scheduler,
+            eta_min=args.eta_min,
+            num_workers=args.num_workers,
             kernel_size=args.kernel_size,
             revin=args.revin,
         )
@@ -777,14 +862,42 @@ def main() -> None:
         sampling_summary["max_train_windows"] = int(args.max_train_windows)
         sampling_summary["selected_rows_after_train_cap"] = int(len(registry))
     histories, targets = extract_histories_and_targets(registry, data_dir=args.data_dir)
+    standardizer = build_train_split_standardizer(registry, histories, targets) if config.train_set_standardize else None
+    model_histories, model_targets = apply_standardizer_to_series_maps(histories, targets, standardizer)
     device = _select_device(args.device)
     if args.expert_model == "patchtst":
-        model, training_stats = train_quito_patchtst_model(registry, histories, targets, config=config, device=device)
+        model, training_stats = train_quito_patchtst_model(
+            registry,
+            model_histories,
+            model_targets,
+            config=config,
+            device=device,
+        )
     elif args.expert_model == "tsmixer":
-        model, training_stats = train_quito_tsmixer_model(registry, histories, targets, config=config, device=device)
+        model, training_stats = train_quito_tsmixer_model(
+            registry,
+            model_histories,
+            model_targets,
+            config=config,
+            device=device,
+        )
     else:
-        model, training_stats = train_quito_dlinear_model(registry, histories, targets, config=config, device=device)
-    prediction_map = predict_with_model(model, registry, histories, targets, config=config, device=device)
+        model, training_stats = train_quito_dlinear_model(
+            registry,
+            model_histories,
+            model_targets,
+            config=config,
+            device=device,
+        )
+    prediction_map = predict_with_model(
+        model,
+        registry,
+        model_histories,
+        model_targets,
+        config=config,
+        device=device,
+        output_standardizer=standardizer,
+    )
     predictions = (
         build_patchtst_prediction_table(registry, prediction_map)
         if args.expert_model == "patchtst"
@@ -815,6 +928,7 @@ def main() -> None:
         sampling_summary=sampling_summary,
     )
     manifest["input_registry_manifest"] = registry_manifest
+    manifest["standardization"] = asdict(standardizer) if standardizer is not None else {"enabled": False}
     out_dir = write_expert_cache_outputs(
         predictions=predictions,
         errors=errors,
