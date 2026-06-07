@@ -240,61 +240,71 @@ Expected: 20k cache completes.
 
 ### Task 5: Compare and Log Stage 1.4d
 
-- [ ] **Step 1: Compare PatchTST lower learning rate**
+- [ ] **Step 1: Run DLinear 20k reference**
 
 Run:
 
 ```bash
-conda run --no-capture-output -n quito python tools/quitobench_expert_cache_comparison.py --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/lightweight_v1__seasonal_naive_full --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/dlinear_v1__stratified_50k_cuda_e5 --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/patchtst_v1__stratified_20k_cuda_e5_lr3e4 --required-experts seasonal_naive,dlinear_quito,patchtst_quito --comparison-id stage1_4d_patchtst_20k_e5_lr3e4__seasonal_naive_dlinear
+CUDA_VISIBLE_DEVICES=0 conda run --no-capture-output -n quito python tools/quitobench_framework_expert_cache.py --expert-model dlinear --stratified-rows 20000 --epochs 5 --batch-size 128 --learning-rate 0.001 --expert-set-id dlinear_v1__stratified_20k_cuda_e5 --device cuda
 ```
 
-Expected: comparison completes with 20k common windows.
+Expected: 20k cache completes. Use this cache for Stage 1.4d comparison so all diagnostic experts share the same 20k sample.
 
-- [ ] **Step 2: Compare PatchTST smaller model**
+- [ ] **Step 2: Compare PatchTST lower learning rate**
 
 Run:
 
 ```bash
-conda run --no-capture-output -n quito python tools/quitobench_expert_cache_comparison.py --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/lightweight_v1__seasonal_naive_full --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/dlinear_v1__stratified_50k_cuda_e5 --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/patchtst_v1__stratified_20k_cuda_e5_small_lr3e4 --required-experts seasonal_naive,dlinear_quito,patchtst_quito --comparison-id stage1_4d_patchtst_20k_e5_small_lr3e4__seasonal_naive_dlinear
+conda run --no-capture-output -n quito python tools/quitobench_expert_cache_comparison.py --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/lightweight_v1__seasonal_naive_full --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/dlinear_v1__stratified_20k_cuda_e5 --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/patchtst_v1__stratified_20k_cuda_e5_lr3e4 --required-experts seasonal_naive,dlinear_quito,patchtst_quito --comparison-id stage1_4d_patchtst_20k_e5_lr3e4__seasonal_naive_dlinear
 ```
 
 Expected: comparison completes with 20k common windows.
 
-- [ ] **Step 3: Compare PatchTST RevIN off**
+- [ ] **Step 3: Compare PatchTST smaller model**
 
 Run:
 
 ```bash
-conda run --no-capture-output -n quito python tools/quitobench_expert_cache_comparison.py --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/lightweight_v1__seasonal_naive_full --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/dlinear_v1__stratified_50k_cuda_e5 --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/patchtst_v1__stratified_20k_cuda_e5_lr3e4_no_revin --required-experts seasonal_naive,dlinear_quito,patchtst_quito --comparison-id stage1_4d_patchtst_20k_e5_lr3e4_no_revin__seasonal_naive_dlinear
+conda run --no-capture-output -n quito python tools/quitobench_expert_cache_comparison.py --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/lightweight_v1__seasonal_naive_full --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/dlinear_v1__stratified_20k_cuda_e5 --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/patchtst_v1__stratified_20k_cuda_e5_small_lr3e4 --required-experts seasonal_naive,dlinear_quito,patchtst_quito --comparison-id stage1_4d_patchtst_20k_e5_small_lr3e4__seasonal_naive_dlinear
 ```
 
 Expected: comparison completes with 20k common windows.
 
-- [ ] **Step 4: Compare TSMixer lower learning rate**
+- [ ] **Step 4: Compare PatchTST RevIN off**
 
 Run:
 
 ```bash
-conda run --no-capture-output -n quito python tools/quitobench_expert_cache_comparison.py --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/lightweight_v1__seasonal_naive_full --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/dlinear_v1__stratified_50k_cuda_e5 --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/tsmixer_v1__stratified_20k_cuda_e5_lr3e4 --required-experts seasonal_naive,dlinear_quito,tsmixer_quito --comparison-id stage1_4d_tsmixer_20k_e5_lr3e4__seasonal_naive_dlinear
+conda run --no-capture-output -n quito python tools/quitobench_expert_cache_comparison.py --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/lightweight_v1__seasonal_naive_full --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/dlinear_v1__stratified_20k_cuda_e5 --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/patchtst_v1__stratified_20k_cuda_e5_lr3e4_no_revin --required-experts seasonal_naive,dlinear_quito,patchtst_quito --comparison-id stage1_4d_patchtst_20k_e5_lr3e4_no_revin__seasonal_naive_dlinear
 ```
 
 Expected: comparison completes with 20k common windows.
 
-- [ ] **Step 5: Compare TSMixer RevIN off**
+- [ ] **Step 5: Compare TSMixer lower learning rate**
 
 Run:
 
 ```bash
-conda run --no-capture-output -n quito python tools/quitobench_expert_cache_comparison.py --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/lightweight_v1__seasonal_naive_full --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/dlinear_v1__stratified_50k_cuda_e5 --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/tsmixer_v1__stratified_20k_cuda_e5_lr3e4_no_revin --required-experts seasonal_naive,dlinear_quito,tsmixer_quito --comparison-id stage1_4d_tsmixer_20k_e5_lr3e4_no_revin__seasonal_naive_dlinear
+conda run --no-capture-output -n quito python tools/quitobench_expert_cache_comparison.py --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/lightweight_v1__seasonal_naive_full --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/dlinear_v1__stratified_20k_cuda_e5 --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/tsmixer_v1__stratified_20k_cuda_e5_lr3e4 --required-experts seasonal_naive,dlinear_quito,tsmixer_quito --comparison-id stage1_4d_tsmixer_20k_e5_lr3e4__seasonal_naive_dlinear
 ```
 
 Expected: comparison completes with 20k common windows.
 
-- [ ] **Step 6: Write log**
+- [ ] **Step 6: Compare TSMixer RevIN off**
+
+Run:
+
+```bash
+conda run --no-capture-output -n quito python tools/quitobench_expert_cache_comparison.py --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/lightweight_v1__seasonal_naive_full --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/dlinear_v1__stratified_20k_cuda_e5 --cache-dir outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/tsmixer_v1__stratified_20k_cuda_e5_lr3e4_no_revin --required-experts seasonal_naive,dlinear_quito,tsmixer_quito --comparison-id stage1_4d_tsmixer_20k_e5_lr3e4_no_revin__seasonal_naive_dlinear
+```
+
+Expected: comparison completes with 20k common windows.
+
+- [ ] **Step 7: Write log**
 
 Create `experiment_logs/2026-06-07_1626_stage1_4d_training_stability_diagnostics.md` with command matrix, training losses, comparison summaries, and decision.
 
-- [ ] **Step 7: Update overview and commit**
+- [ ] **Step 8: Update overview and commit**
 
 Run:
 
