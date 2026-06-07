@@ -28,6 +28,9 @@ if QUITO_ROOT.exists() and str(QUITO_ROOT) not in sys.path:
     sys.path.insert(0, str(QUITO_ROOT))
 
 from quito.config.model import DLinearModelConfig, PatchTSTModelConfig, TSMixerModelConfig
+from quito.config.data import DatasetConfig, Features, Freq
+from quito.config.training import ModeType
+from quito.datasets import TimeSeriesDataset
 from quito.models.dlinear import DLinear
 from quito.models.patchtst import PatchTST
 from quito.models.tsmixer import TSMixer
@@ -51,6 +54,8 @@ PATCHTST_EXPERT_ID = "patchtst_quito"
 PATCHTST_EXPERT_FAMILY = "patch_transformer"
 TSMIXER_EXPERT_ID = "tsmixer_quito"
 TSMIXER_EXPERT_FAMILY = "mlp_mixer"
+QUITO_GLOBAL_TEST_POINT = "2023-07-28 00:00:00"
+QUITO_SUBSET_FREQ = {"hour": Freq.H, "min": Freq.M}
 
 
 @dataclass(frozen=True)
@@ -60,6 +65,24 @@ class WindowStandardizer:
     mean: float
     std: float
     scope: str
+
+    def transform(self, values: Sequence[float] | np.ndarray) -> np.ndarray:
+        return (np.asarray(values, dtype=np.float32) - np.float32(self.mean)) / np.float32(self.std)
+
+    def inverse_transform(self, values: Sequence[float] | np.ndarray) -> np.ndarray:
+        return np.asarray(values, dtype=np.float32) * np.float32(self.std) + np.float32(self.mean)
+
+
+@dataclass(frozen=True)
+class QuitoWindowScaler:
+    """Quito TimeSeriesDataset train 段 item/channel scaler。"""
+
+    mean: float
+    std: float
+    subset: str
+    item_id: int
+    channel: str
+    scope: str = "quito_timeseries_dataset_train_segment"
 
     def transform(self, values: Sequence[float] | np.ndarray) -> np.ndarray:
         return (np.asarray(values, dtype=np.float32) - np.float32(self.mean)) / np.float32(self.std)
@@ -129,6 +152,164 @@ def apply_standardizer_to_series_maps(
         {key: standardizer.transform(value) for key, value in histories.items()},
         {key: standardizer.transform(value) for key, value in targets.items()},
     )
+
+
+def _make_quito_dataset_for_subset(
+    subset: str,
+    data_dir: Path,
+    seq_len: int,
+    pred_len: int,
+) -> TimeSeriesDataset:
+    if subset not in QUITO_SUBSET_FREQ:
+        raise ValueError(f"未知 subset：{subset}")
+    ds_config = DatasetConfig(
+        train_ratio=0.7,
+        valid_ratio=0.2,
+        test_ratio=0.1,
+        file_name=f"test_{subset}-00001-of-00001.parquet",
+        is_pretrain=False,
+        freq=QUITO_SUBSET_FREQ[subset],
+        ds_cls="TimeSeriesDataset",
+        target="ind_1",
+    )
+    return TimeSeriesDataset(
+        data_dir=str(data_dir),
+        seq_len=seq_len,
+        decoder_label_len=0,
+        forecast_horizon=pred_len,
+        features=Features.S,
+        ds_config=ds_config,
+        mode=ModeType.TRAIN,
+        normalize=True,
+        name=f"TEST_DATA_{subset.upper()}",
+        cleanup=False,
+        global_test_point=QUITO_GLOBAL_TEST_POINT,
+    )
+
+
+def _quito_dataset_lookup(dataset: TimeSeriesDataset) -> tuple[dict[int, int], dict[str, int], dict[int, pd.DataFrame]]:
+    if dataset._df is None:
+        raise ValueError("Quito TimeSeriesDataset 需要 cleanup=False 以保留原始 dataframe")
+    df = dataset._df.copy()
+    df[dataset.date_col] = pd.to_datetime(df[dataset.date_col])
+    if "item_id" not in df.columns:
+        raise ValueError("QuitoBench 数据缺少 item_id，无法映射 registry row")
+    df_sorted = df.sort_values(["item_id", dataset.date_col])
+    unique_ids = [int(value) for value in df_sorted["item_id"].unique()]
+    item_pos = {item_id: idx for idx, item_id in enumerate(unique_ids)}
+    channel_pos = {str(channel): idx for idx, channel in enumerate(dataset.feature_cols)}
+    item_frames = {
+        item_id: group.sort_values(dataset.date_col).reset_index(drop=True)
+        for item_id, group in df_sorted.groupby("item_id", sort=True)
+    }
+    return item_pos, channel_pos, {int(key): value for key, value in item_frames.items()}
+
+
+def extract_quito_standardized_series_maps(
+    registry: pd.DataFrame,
+    data_dir: Path,
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, np.ndarray], dict[str, QuitoWindowScaler], dict[str, object]]:
+    """复用 Quito TimeSeriesDataset 的 train 段 scaler，并按 registry 抽取窗口。"""
+
+    validate_registry(registry)
+    history_lens = registry["history_len"].astype(int).unique()
+    pred_lens = registry["pred_len"].astype(int).unique()
+    if len(history_lens) != 1 or len(pred_lens) != 1:
+        raise ValueError("Quito 标准化抽取要求单一 history_len/pred_len")
+    seq_len = int(history_lens[0])
+    pred_len = int(pred_lens[0])
+    histories: dict[str, np.ndarray] = {}
+    targets: dict[str, np.ndarray] = {}
+    raw_targets: dict[str, np.ndarray] = {}
+    scalers: dict[str, QuitoWindowScaler] = {}
+    dataset_cache: dict[str, TimeSeriesDataset] = {}
+    lookup_cache: dict[str, tuple[dict[int, int], dict[str, int], dict[int, pd.DataFrame]]] = {}
+
+    for row in registry.itertuples(index=False):
+        subset = str(row.subset)
+        if subset not in dataset_cache:
+            dataset = _make_quito_dataset_for_subset(subset, data_dir=data_dir, seq_len=seq_len, pred_len=pred_len)
+            dataset_cache[subset] = dataset
+            lookup_cache[subset] = _quito_dataset_lookup(dataset)
+        dataset = dataset_cache[subset]
+        item_pos, channel_pos, item_frames = lookup_cache[subset]
+        physical_window_id = str(row.physical_window_id)
+        item_id = int(row.item_id)
+        channel = str(row.channel)
+        if item_id not in item_pos or item_id not in item_frames:
+            raise ValueError(f"Quito dataset 缺少 item：{subset}/{item_id}")
+        if channel not in channel_pos:
+            raise ValueError(f"Quito dataset 缺少 channel：{subset}/{item_id}/{channel}")
+        frame = item_frames[item_id]
+        values = frame[channel].to_numpy(dtype=np.float32)
+        scaler = QuitoWindowScaler(
+            mean=float(dataset.mean[item_pos[item_id], 0, channel_pos[channel]]),
+            std=float(dataset.std[item_pos[item_id], 0, channel_pos[channel]]),
+            subset=subset,
+            item_id=item_id,
+            channel=channel,
+        )
+        history = values[int(row.history_start_idx) : int(row.history_end_idx)]
+        target = values[int(row.target_start_idx) : int(row.target_end_idx)]
+        if len(history) != int(row.history_len):
+            raise ValueError(f"{physical_window_id} history 长度 {len(history)} != {int(row.history_len)}")
+        if len(target) != int(row.pred_len):
+            raise ValueError(f"{physical_window_id} target 长度 {len(target)} != {int(row.pred_len)}")
+        histories[physical_window_id] = scaler.transform(history)
+        targets[physical_window_id] = scaler.transform(target)
+        raw_targets[physical_window_id] = target.astype(float)
+        scalers[physical_window_id] = scaler
+
+    summary = {
+        "enabled": True,
+        "scope": "quito_timeseries_dataset_train_segment",
+        "scaler_granularity": "subset_item_channel",
+        "source_dataset": "quito.datasets.TimeSeriesDataset",
+        "global_test_point": QUITO_GLOBAL_TEST_POINT,
+        "seq_len": seq_len,
+        "pred_len": pred_len,
+        "subsets": sorted(dataset_cache.keys()),
+        "num_window_scalers": int(len(scalers)),
+    }
+    return histories, targets, raw_targets, scalers, summary
+
+
+def inverse_transform_prediction_map(
+    predictions_by_id: Mapping[str, Sequence[float]],
+    scalers_by_id: Mapping[str, QuitoWindowScaler],
+) -> dict[str, np.ndarray]:
+    """按每个 window 对应的 Quito item/channel scaler 逆变换预测。"""
+
+    restored: dict[str, np.ndarray] = {}
+    for physical_window_id, prediction in predictions_by_id.items():
+        if physical_window_id not in scalers_by_id:
+            raise KeyError(f"缺少 scaler：{physical_window_id}")
+        restored[physical_window_id] = scalers_by_id[physical_window_id].inverse_transform(prediction).astype(float)
+    return restored
+
+
+def prepare_model_series_maps(
+    registry: pd.DataFrame,
+    data_dir: Path,
+    train_set_standardize: bool,
+) -> tuple[
+    dict[str, np.ndarray],
+    dict[str, np.ndarray],
+    dict[str, np.ndarray],
+    dict[str, QuitoWindowScaler] | None,
+    dict[str, object],
+]:
+    """准备模型输入尺度和最终误差用 raw target。"""
+
+    if train_set_standardize:
+        model_histories, model_targets, raw_targets, scalers, summary = extract_quito_standardized_series_maps(
+            registry,
+            data_dir=data_dir,
+        )
+        return model_histories, model_targets, raw_targets, scalers, summary
+    raw_histories, raw_targets = extract_histories_and_targets(registry, data_dir=data_dir)
+    model_histories, model_targets = apply_standardizer_to_series_maps(raw_histories, raw_targets, None)
+    return model_histories, model_targets, raw_targets, None, {"enabled": False}
 
 
 @dataclass(frozen=True)
@@ -861,9 +1042,11 @@ def main() -> None:
         validate_registry(registry)
         sampling_summary["max_train_windows"] = int(args.max_train_windows)
         sampling_summary["selected_rows_after_train_cap"] = int(len(registry))
-    histories, targets = extract_histories_and_targets(registry, data_dir=args.data_dir)
-    standardizer = build_train_split_standardizer(registry, histories, targets) if config.train_set_standardize else None
-    model_histories, model_targets = apply_standardizer_to_series_maps(histories, targets, standardizer)
+    model_histories, model_targets, targets, prediction_scalers, standardization_summary = prepare_model_series_maps(
+        registry,
+        data_dir=args.data_dir,
+        train_set_standardize=config.train_set_standardize,
+    )
     device = _select_device(args.device)
     if args.expert_model == "patchtst":
         model, training_stats = train_quito_patchtst_model(
@@ -896,8 +1079,9 @@ def main() -> None:
         model_targets,
         config=config,
         device=device,
-        output_standardizer=standardizer,
     )
+    if prediction_scalers is not None:
+        prediction_map = inverse_transform_prediction_map(prediction_map, prediction_scalers)
     predictions = (
         build_patchtst_prediction_table(registry, prediction_map)
         if args.expert_model == "patchtst"
@@ -928,7 +1112,7 @@ def main() -> None:
         sampling_summary=sampling_summary,
     )
     manifest["input_registry_manifest"] = registry_manifest
-    manifest["standardization"] = asdict(standardizer) if standardizer is not None else {"enabled": False}
+    manifest["standardization"] = standardization_summary
     out_dir = write_expert_cache_outputs(
         predictions=predictions,
         errors=errors,

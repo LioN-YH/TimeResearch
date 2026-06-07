@@ -21,7 +21,10 @@ from tools.quitobench_framework_expert_cache import (
     build_dlinear_prediction_table,
     build_patchtst_prediction_table,
     build_tsmixer_prediction_table,
+    extract_quito_standardized_series_maps,
+    inverse_transform_prediction_map,
     parse_args,
+    prepare_model_series_maps,
     predict_with_model,
     select_stratified_registry,
     train_quito_patchtst_model,
@@ -80,6 +83,49 @@ def _toy_histories_targets() -> tuple[dict[str, np.ndarray], dict[str, np.ndarra
     return histories, targets
 
 
+def _write_toy_quito_parquet(data_dir: Path) -> None:
+    data_dir.mkdir(parents=True, exist_ok=True)
+    dates = pd.date_range("2023-07-27 14:00:00", periods=14, freq="h")
+    rows = []
+    for item_id, offset in [(101, 0.0), (202, 100.0)]:
+        for idx, dt in enumerate(dates):
+            rows.append(
+                {
+                    "date_time": dt,
+                    "item_id": item_id,
+                    "cluster": 0,
+                    "ind_1": offset + float(idx),
+                    "ind_2": offset + 200.0 + float(idx),
+                }
+            )
+    pd.DataFrame(rows).to_parquet(data_dir / "test_hour-00001-of-00001.parquet", index=False)
+
+
+def _toy_quito_registry_for_standardization() -> pd.DataFrame:
+    base = _toy_registry().iloc[0].to_dict()
+    rows = []
+    for window_id, item_id, channel in [("q1", 101, "ind_1"), ("q2", 202, "ind_2")]:
+        row = dict(base)
+        row.update(
+            {
+                "physical_window_id": window_id,
+                "window_id": window_id,
+                "subset": "hour",
+                "split": "valid",
+                "item_id": item_id,
+                "channel": channel,
+                "history_start_idx": 5,
+                "history_end_idx": 8,
+                "target_start_idx": 8,
+                "target_end_idx": 10,
+                "history_len": 3,
+                "pred_len": 2,
+            }
+        )
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def test_registry_window_dataset_keeps_requested_split_only() -> None:
     registry = _toy_registry()
     histories, targets = _toy_histories_targets()
@@ -123,6 +169,55 @@ def test_apply_standardizer_round_trips_histories_and_targets() -> None:
     assert scaled_histories["w_1"][0] == pytest.approx(-2.0)
     restored = standardizer.inverse_transform(scaled_targets["w_1"])
     np.testing.assert_allclose(restored, targets["w_1"])
+
+
+def test_extract_quito_standardized_series_maps_uses_official_train_segment_per_item_channel(tmp_path: Path) -> None:
+    _write_toy_quito_parquet(tmp_path)
+    registry = _toy_quito_registry_for_standardization()
+
+    histories, targets, raw_targets, scalers, summary = extract_quito_standardized_series_maps(
+        registry,
+        data_dir=tmp_path,
+    )
+
+    expected_std = float(np.std(np.arange(8, dtype=np.float32)) + 1e-8)
+    np.testing.assert_allclose(histories["q1"], (np.array([5.0, 6.0, 7.0]) - 3.5) / expected_std)
+    np.testing.assert_allclose(targets["q1"], (np.array([8.0, 9.0]) - 3.5) / expected_std)
+    np.testing.assert_allclose(raw_targets["q1"], np.array([8.0, 9.0]))
+    assert scalers["q1"].mean == pytest.approx(3.5)
+    assert scalers["q2"].mean == pytest.approx(303.5)
+    assert scalers["q1"].std == pytest.approx(expected_std)
+    assert scalers["q2"].std == pytest.approx(expected_std)
+    assert summary["scope"] == "quito_timeseries_dataset_train_segment"
+    assert summary["scaler_granularity"] == "subset_item_channel"
+
+
+def test_inverse_transform_prediction_map_uses_window_specific_quito_scalers(tmp_path: Path) -> None:
+    _write_toy_quito_parquet(tmp_path)
+    registry = _toy_quito_registry_for_standardization()
+    _, targets, _, scalers, _ = extract_quito_standardized_series_maps(registry, data_dir=tmp_path)
+
+    restored = inverse_transform_prediction_map(targets, scalers)
+
+    np.testing.assert_allclose(restored["q1"], np.array([8.0, 9.0]), rtol=1e-6)
+    np.testing.assert_allclose(restored["q2"], np.array([308.0, 309.0]), rtol=1e-6)
+
+
+def test_prepare_model_series_maps_uses_quito_adapter_when_train_set_standardize_is_enabled(tmp_path: Path) -> None:
+    _write_toy_quito_parquet(tmp_path)
+    registry = _toy_quito_registry_for_standardization()
+
+    model_histories, model_targets, error_targets, scalers, summary = prepare_model_series_maps(
+        registry,
+        data_dir=tmp_path,
+        train_set_standardize=True,
+    )
+
+    assert scalers is not None
+    assert summary["scope"] == "quito_timeseries_dataset_train_segment"
+    assert model_histories["q1"].shape == (3,)
+    assert model_targets["q1"].shape == (2,)
+    np.testing.assert_allclose(error_targets["q1"], np.array([8.0, 9.0]))
 
 
 def test_build_dlinear_prediction_table_reuses_stage14a_schema() -> None:
