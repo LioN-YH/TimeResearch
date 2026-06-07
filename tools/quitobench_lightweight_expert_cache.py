@@ -69,6 +69,20 @@ class LightweightExpertConfig:
     random_seed: int = 20260607
 
 
+def normalize_expert_ids(expert_ids: Sequence[str] | None = None) -> tuple[str, ...]:
+    """校验并规范化本次实际运行的轻量专家集合。"""
+
+    selected = tuple(EXPERT_IDS if expert_ids is None else expert_ids)
+    if not selected:
+        raise ValueError("expert_ids 不能为空")
+    unknown = [expert_id for expert_id in selected if expert_id not in EXPERT_IDS]
+    if unknown:
+        raise ValueError(f"未知轻量专家：{unknown}")
+    if len(set(selected)) != len(selected):
+        raise ValueError(f"expert_ids 不能重复：{selected}")
+    return selected
+
+
 def validate_registry(registry: pd.DataFrame) -> None:
     missing = REQUIRED_REGISTRY_COLUMNS - set(registry.columns)
     if missing:
@@ -129,11 +143,13 @@ def compute_lightweight_expert_predictions(
     registry: pd.DataFrame,
     histories: Mapping[str, Sequence[float]],
     config: LightweightExpertConfig | None = None,
+    expert_ids: Sequence[str] | None = None,
 ) -> pd.DataFrame:
-    """对每个 physical_window_id 只用 history 计算四个轻量专家预测。"""
+    """对每个 physical_window_id 只用 history 计算指定轻量专家预测。"""
 
     validate_registry(registry)
     cfg = config or LightweightExpertConfig()
+    selected_expert_ids = normalize_expert_ids(expert_ids)
     rows: list[dict[str, object]] = []
 
     for row in registry.itertuples(index=False):
@@ -152,7 +168,8 @@ def compute_lightweight_expert_predictions(
             "linear_trend": _linear_trend(history, pred_len),
         }
 
-        for expert_id, prediction in expert_predictions.items():
+        for expert_id in selected_expert_ids:
+            prediction = expert_predictions[expert_id]
             out_row = {
                 "physical_window_id": physical_window_id,
                 "window_id": str(row.window_id),
@@ -276,6 +293,51 @@ def compute_oracle_summary(errors: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def select_stratified_registry(
+    registry: pd.DataFrame,
+    target_rows: int,
+    stratify_columns: Sequence[str],
+    random_seed: int,
+) -> pd.DataFrame:
+    """按给定列做确定性分层抽样，尽量让每个非空 cell 均衡覆盖。"""
+
+    if target_rows <= 0:
+        raise ValueError("target_rows 必须为正整数")
+    missing = set(stratify_columns) - set(registry.columns)
+    if missing:
+        raise ValueError(f"registry 缺少分层列：{sorted(missing)}")
+    if target_rows >= len(registry):
+        return registry.copy().reset_index(drop=True)
+
+    rng = np.random.default_rng(random_seed)
+    group_keys = list(stratify_columns)
+    groups: list[pd.DataFrame] = []
+    for _, group in registry.groupby(group_keys, sort=True, dropna=False):
+        # 先在组内随机打散，再由全局 quota 控制每组取多少，保证可复现且不依赖原始排序。
+        order = rng.permutation(len(group))
+        groups.append(group.iloc[order].reset_index(drop=True))
+
+    base_quota = target_rows // len(groups)
+    remainder = target_rows % len(groups)
+    allocations = [min(len(group), base_quota) for group in groups]
+    remaining = target_rows - sum(allocations)
+
+    cursor = 0
+    while remaining > 0:
+        group_idx = cursor % len(groups)
+        if allocations[group_idx] < len(groups[group_idx]):
+            allocations[group_idx] += 1
+            remaining -= 1
+        cursor += 1
+        if cursor > len(groups) * (target_rows + 1):
+            raise RuntimeError("分层抽样 quota 分配未能收敛")
+
+    sampled = pd.concat([group.iloc[:take] for group, take in zip(groups, allocations) if take > 0], ignore_index=True)
+    sampled = sampled.sample(frac=1.0, random_state=random_seed).reset_index(drop=True)
+    validate_registry(sampled)
+    return sampled
+
+
 def build_cell_model_matrix(errors: pd.DataFrame) -> pd.DataFrame:
     """按 official TSF cell 汇总每个 expert 的平均误差和胜率。"""
 
@@ -301,18 +363,29 @@ def build_cache_manifest(
     elapsed_seconds: float,
     input_registry_dir: Path,
     max_rows: int | None,
+    stratified_rows: int | None,
+    stratify_columns: Sequence[str],
+    expert_ids: Sequence[str] | None = None,
     config: LightweightExpertConfig | None = None,
 ) -> dict[str, object]:
     cfg = config or LightweightExpertConfig()
+    selected_expert_ids = normalize_expert_ids(expert_ids)
+    actual_prediction_experts = tuple(sorted(predictions["expert_id"].astype(str).unique().tolist()))
+    actual_error_experts = tuple(sorted(errors["expert_id"].astype(str).unique().tolist()))
+    expected_experts = tuple(sorted(selected_expert_ids))
+    if actual_prediction_experts != expected_experts or actual_error_experts != expected_experts:
+        raise ValueError("expert_ids 与 predictions/errors 实际专家集合不一致")
     return {
         "stage": cfg.stage,
         "expert_set_id": cfg.expert_set_id,
-        "expert_ids": list(EXPERT_IDS),
-        "expert_families": EXPERT_FAMILY,
+        "expert_ids": list(selected_expert_ids),
+        "expert_families": {expert_id: EXPERT_FAMILY[expert_id] for expert_id in selected_expert_ids},
         "sample_set_id": sorted(registry["sample_set_id"].astype(str).unique().tolist()),
         "base_registry_id": sorted(registry["base_registry_id"].astype(str).unique().tolist()),
         "input_registry_dir": str(input_registry_dir),
         "max_rows": max_rows,
+        "stratified_rows": stratified_rows,
+        "stratify_columns": list(stratify_columns),
         "total_windows": int(registry["physical_window_id"].nunique()),
         "prediction_rows": int(len(predictions)),
         "error_rows": int(len(errors)),
@@ -361,13 +434,28 @@ def write_expert_cache_outputs(
     return out_dir
 
 
-def load_registry(registry_dir: Path, max_rows: int | None = None) -> tuple[pd.DataFrame, dict[str, object]]:
+def load_registry(
+    registry_dir: Path,
+    max_rows: int | None = None,
+    stratified_rows: int | None = None,
+    stratify_columns: Sequence[str] = ("split", "subset", "official_tsf_cell"),
+    random_seed: int = 20260607,
+) -> tuple[pd.DataFrame, dict[str, object]]:
     registry_path = registry_dir / "window_index.csv"
     manifest_path = registry_dir / "manifest.json"
     if not registry_path.exists():
         raise FileNotFoundError(f"registry 不存在：{registry_path}")
     registry = pd.read_csv(registry_path)
-    if max_rows is not None:
+    if max_rows is not None and stratified_rows is not None:
+        raise ValueError("--max-rows 和 --stratified-rows 不能同时使用")
+    if stratified_rows is not None:
+        registry = select_stratified_registry(
+            registry,
+            target_rows=stratified_rows,
+            stratify_columns=stratify_columns,
+            random_seed=random_seed,
+        )
+    elif max_rows is not None:
         registry = registry.head(max_rows).copy()
     validate_registry(registry)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
@@ -422,7 +510,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--expert-set-id", default="lightweight_v1")
+    parser.add_argument(
+        "--expert-ids",
+        default=",".join(EXPERT_IDS),
+        help="逗号分隔的轻量专家列表；全量 seasonal baseline 可设为 seasonal_naive",
+    )
     parser.add_argument("--max-rows", type=int, default=None)
+    parser.add_argument("--stratified-rows", type=int, default=None)
+    parser.add_argument(
+        "--stratify-columns",
+        default="split,subset,official_tsf_cell",
+        help="逗号分隔的分层列，默认 split,subset,official_tsf_cell",
+    )
     parser.add_argument("--recent-mean-fraction", type=float, default=0.25)
     parser.add_argument("--soft-oracle-temperature", type=float, default=1.0)
     return parser.parse_args()
@@ -436,9 +535,17 @@ def main() -> None:
         soft_oracle_temperature=args.soft_oracle_temperature,
     )
     start = time.perf_counter()
-    registry, registry_manifest = load_registry(args.registry_dir, max_rows=args.max_rows)
+    expert_ids = normalize_expert_ids(tuple(expert_id.strip() for expert_id in args.expert_ids.split(",") if expert_id.strip()))
+    stratify_columns = tuple(col.strip() for col in args.stratify_columns.split(",") if col.strip())
+    registry, registry_manifest = load_registry(
+        args.registry_dir,
+        max_rows=args.max_rows,
+        stratified_rows=args.stratified_rows,
+        stratify_columns=stratify_columns,
+        random_seed=config.random_seed,
+    )
     histories, targets = extract_histories_and_targets(registry, data_dir=args.data_dir)
-    predictions = compute_lightweight_expert_predictions(registry, histories, config=config)
+    predictions = compute_lightweight_expert_predictions(registry, histories, config=config, expert_ids=expert_ids)
     errors = compute_error_table(predictions, targets, config=config)
     oracle_summary = compute_oracle_summary(errors)
     cell_model_matrix = build_cell_model_matrix(errors)
@@ -450,6 +557,9 @@ def main() -> None:
         elapsed_seconds=elapsed,
         input_registry_dir=args.registry_dir,
         max_rows=args.max_rows,
+        stratified_rows=args.stratified_rows,
+        stratify_columns=stratify_columns,
+        expert_ids=expert_ids,
         config=config,
     )
     manifest["input_registry_manifest"] = registry_manifest

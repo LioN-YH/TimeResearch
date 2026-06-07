@@ -14,6 +14,7 @@ from tools.quitobench_lightweight_expert_cache import (
     compute_error_table,
     compute_lightweight_expert_predictions,
     compute_oracle_summary,
+    select_stratified_registry,
     validate_registry,
     write_expert_cache_outputs,
 )
@@ -89,6 +90,21 @@ def test_compute_lightweight_expert_predictions_uses_history_only() -> None:
     np.testing.assert_allclose(linear, np.array([38.92857143, 44.52380952, 50.11904762, 55.71428571]), atol=1e-8)
 
 
+def test_compute_lightweight_expert_predictions_can_select_single_expert() -> None:
+    registry = _toy_registry().iloc[[0]].reset_index(drop=True)
+    histories = {"w_1": np.array([1, 2, 3, 4, 10, 20, 30, 40], dtype=float)}
+
+    predictions = compute_lightweight_expert_predictions(registry, histories, expert_ids=("seasonal_naive",))
+
+    assert predictions["expert_id"].tolist() == ["seasonal_naive"]
+    assert predictions[["yhat_0", "yhat_1", "yhat_2", "yhat_3"]].iloc[0].to_numpy(dtype=float).tolist() == [
+        10.0,
+        20.0,
+        30.0,
+        40.0,
+    ]
+
+
 def test_compute_error_table_and_oracle_summary() -> None:
     registry = _toy_registry().iloc[[0]].reset_index(drop=True)
     histories = {"w_1": np.array([1, 2, 3, 4, 10, 20, 30, 40], dtype=float)}
@@ -118,11 +134,64 @@ def test_validate_registry_rejects_duplicate_physical_window_id() -> None:
         validate_registry(registry)
 
 
-def test_write_expert_cache_outputs_writes_expected_files(tmp_path: Path) -> None:
+def test_build_cache_manifest_rejects_expert_id_mismatch() -> None:
     registry = _toy_registry().iloc[[0]].reset_index(drop=True)
     histories = {"w_1": np.array([1, 2, 3, 4, 10, 20, 30, 40], dtype=float)}
     targets = {"w_1": np.array([10, 20, 30, 40], dtype=float)}
     predictions = compute_lightweight_expert_predictions(registry, histories)
+    errors = compute_error_table(predictions, targets)
+
+    with pytest.raises(ValueError, match="expert_ids 与 predictions/errors 实际专家集合不一致"):
+        build_cache_manifest(
+            registry=registry,
+            predictions=predictions,
+            errors=errors,
+            elapsed_seconds=0.5,
+            input_registry_dir=Path("/tmp/registry"),
+            max_rows=1,
+            stratified_rows=None,
+            stratify_columns=("split", "subset", "official_tsf_cell"),
+            expert_ids=("seasonal_naive",),
+        )
+
+
+def test_select_stratified_registry_balances_split_subset_cell() -> None:
+    rows = []
+    for split in ["valid", "test"]:
+        for subset in ["hour", "min"]:
+            for cell in ["cell_a", "cell_b"]:
+                for idx in range(5):
+                    rows.append(
+                        {
+                            **_toy_registry().iloc[0].to_dict(),
+                            "physical_window_id": f"{split}_{subset}_{cell}_{idx}",
+                            "window_id": f"{split}_{subset}_{cell}_{idx}",
+                            "split": split,
+                            "subset": subset,
+                            "official_tsf_cell": cell,
+                        }
+                    )
+    registry = pd.DataFrame(rows)
+
+    sampled = select_stratified_registry(
+        registry,
+        target_rows=16,
+        stratify_columns=("split", "subset", "official_tsf_cell"),
+        random_seed=7,
+    )
+
+    assert len(sampled) == 16
+    assert sampled["physical_window_id"].is_unique
+    group_counts = sampled.groupby(["split", "subset", "official_tsf_cell"]).size()
+    assert group_counts.nunique() == 1
+    assert int(group_counts.iloc[0]) == 2
+
+
+def test_write_expert_cache_outputs_writes_expected_files(tmp_path: Path) -> None:
+    registry = _toy_registry().iloc[[0]].reset_index(drop=True)
+    histories = {"w_1": np.array([1, 2, 3, 4, 10, 20, 30, 40], dtype=float)}
+    targets = {"w_1": np.array([10, 20, 30, 40], dtype=float)}
+    predictions = compute_lightweight_expert_predictions(registry, histories, expert_ids=("seasonal_naive",))
     errors = compute_error_table(predictions, targets)
     oracle = compute_oracle_summary(errors)
     cell_matrix = errors.groupby(["official_tsf_cell", "expert_id"], as_index=False)["mse"].mean()
@@ -133,6 +202,9 @@ def test_write_expert_cache_outputs_writes_expected_files(tmp_path: Path) -> Non
         elapsed_seconds=0.5,
         input_registry_dir=Path("/tmp/registry"),
         max_rows=1,
+        stratified_rows=None,
+        stratify_columns=("split", "subset", "official_tsf_cell"),
+        expert_ids=("seasonal_naive",),
     )
 
     out_dir = write_expert_cache_outputs(
@@ -154,6 +226,7 @@ def test_write_expert_cache_outputs_writes_expected_files(tmp_path: Path) -> Non
     loaded_manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
     assert loaded_manifest["stage"] == "stage1_4a_lightweight_expert_cache"
     assert loaded_manifest["expert_set_id"] == "lightweight_v1"
+    assert loaded_manifest["expert_ids"] == ["seasonal_naive"]
     assert loaded_manifest["implements_router"] is False
     assert loaded_manifest["runs_visual_encoder"] is False
     assert loaded_manifest["runs_neural_experts"] is False
