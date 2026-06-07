@@ -242,3 +242,68 @@ physical_window_id -> history-only normalization -> view_tensor [V=3,H=64,W=192]
 2. 后续如需接 frozen ImageNet ViT，必须单独记录 adapter 方案，不能把 `[V,H,W]` 当作 RGB。
 3. 在可用 GPU 环境中补测 imageization latency。
 4. 继续不要实现 router，不运行专家模型，直到视觉 encoder 和专家预测缓存接口稳定。
+
+## 9. 追加记录：CUDA 环境修复后的 GPU latency
+
+2026-06-07 09:55 重新检查 `quito` 环境，CUDA 已可用：
+
+```bash
+nvidia-smi
+conda run -n quito python -c "import torch; print('torch', torch.__version__); print('compiled cuda', torch.version.cuda); print('cuda available', torch.cuda.is_available()); print('device count', torch.cuda.device_count()); print('device0', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NA')"
+```
+
+结果：
+
+```text
+Driver Version: 550.127.08
+nvidia-smi CUDA Version: 12.4
+GPU: NVIDIA L40 x4
+torch 2.6.0+cu124
+compiled cuda 12.4
+cuda available True
+device count 4
+device0 NVIDIA L40
+```
+
+随后用 GPU 重新运行 Stage 1.2 smoke：
+
+```bash
+conda run -n quito python tools/quitobench_imageization_protocol.py \
+  --max-per-group 8 \
+  --debug-png-count 16 \
+  --device cuda
+```
+
+结果：
+
+```text
+[input] registry_rows=627430 sampled_rows=288 subsets=('hour', 'min')
+[done] output=outputs/vision_ts_routing/image_tensors/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e__stage1_2_smoke_v1
+[done] tensor_shape=[288, 3, 64, 192]
+[done] latency_ms_per_window=1.4718
+[done] proxy_join_rows=288
+```
+
+读回校验：
+
+```text
+validated (288, 3, 64, 192) device cuda gpu True ms_per_window 1.4718023497456063
+```
+
+补充测试：
+
+```bash
+conda run -n quito python -m pytest tests/test_quitobench_imageization_protocol.py -q
+```
+
+结果：
+
+```text
+4 passed in 2.25s
+```
+
+观察：
+
+- 当前 GPU latency 是 288 个 smoke 窗口、单次进程、`cuda:0` 下的 measured tensor imageization latency。
+- 该数值高于 CPU smoke 的 `0.3107 ms/window`，主要可能来自小 batch 下 GPU kernel launch / synchronization / tensor 拼接开销；它不能代表大 batch 或训练时常驻 GPU pipeline 的吞吐上限。
+- Stage 1.3 如果需要严肃比较在线 latency，应单独做 batch size sweep，并区分数据搬运、normalization、三视图构造、encoder forward 的耗时。
