@@ -1,43 +1,43 @@
-# Stage 1.4a Lightweight Expert Cache Implementation Plan
+# Stage 1.4a 轻量专家预测缓存实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **给后续执行 agent：** 必须使用 `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans` 按任务执行本计划。所有步骤使用复选框（`- [ ]`）跟踪。
 
-**Goal:** Build the Stage 1.4a minimal expert prediction cache for four history-only lightweight experts, with prediction/error/oracle outputs keyed by `physical_window_id`.
+**目标：** 为四个只使用 history 的轻量专家构建 Stage 1.4a 最小专家预测缓存，预测、误差和 oracle 输出均以 `physical_window_id` 为主键。
 
-**Architecture:** Add one focused CLI module under `tools/` that loads the Stage 1.0 registry, extracts history/target from QuitoBench data, computes lightweight expert predictions, evaluates target-only errors, writes cache files and manifest, and emits profiling summaries. Add one focused pytest module that locks schema, history-only behavior, expert formulas, uniqueness, manifest flags, and output writing.
+**架构：** 在 `tools/` 下新增一个聚焦的 CLI 模块：加载 Stage 1.0 registry，从 QuitoBench 数据抽取 history/target，计算轻量专家预测，仅用 target 评估误差，写出缓存文件与 manifest，并生成 profiling 汇总。新增一个对应 pytest 模块，锁定 schema、history-only 行为、专家公式、唯一性、manifest 标志和输出写入。
 
-**Tech Stack:** Python, pandas, numpy, pyarrow/parquet via pandas, pytest, existing QuitoBench helpers from `tools.quitobench_window_registry`.
+**技术栈：** Python、pandas、numpy、pandas parquet/pyarrow、pytest，以及 `tools.quitobench_window_registry` 中已有的 QuitoBench helper。
 
 ---
 
-## File Structure
+## 文件结构
 
-Create:
+创建：
 
 - `tools/quitobench_lightweight_expert_cache.py`
-  - Owns Stage 1.4a lightweight expert prediction, error computation, oracle summary, cache writing, and CLI.
-  - Must not import or run visual encoder, router, or neural expert frameworks.
-  - Must use Chinese docstrings/comments for project-specific explanations.
+  - 负责 Stage 1.4a 轻量专家预测、误差计算、oracle 汇总、缓存写入和 CLI。
+  - 不导入、不运行视觉 encoder、router 或 neural expert 框架。
+  - 项目语义相关的 docstring 和注释必须使用中文。
 
 - `tests/test_quitobench_lightweight_expert_cache.py`
-  - Unit tests for toy histories/targets, schema validation, output writing, and manifest flags.
+  - 覆盖 toy history/target、schema 校验、输出写入和 manifest 标志的单元测试。
 
 - `experiment_logs/YYYY-MM-DD_HHMM_stage1_4a_lightweight_expert_cache.md`
-  - Created during execution run, not during initial implementation.
-  - Must be registered in `experiment_logs/实验日志总览.md`.
+  - 在实际执行 smoke/full run 时创建，初始实现阶段不提前写实验结论。
+  - 创建后必须登记到 `experiment_logs/实验日志总览.md`。
 
-Modify during execution:
+执行阶段修改：
 
 - `experiment_logs/实验日志总览.md`
-  - Add one row after the Stage 1.4a smoke/full execution log exists.
+  - Stage 1.4a smoke/full 执行日志存在后追加一行记录。
 
-Do not modify:
+不修改：
 
-- Quito upstream code under `quito/`.
-- Stage 1.0/1.1/1.2 output files.
-- Router/gate code, because Stage 1.4a must not implement router.
+- `quito/` 下的 Quito 上游代码。
+- Stage 1.0/1.1/1.2 已有输出文件。
+- router/gate 代码，因为 Stage 1.4a 不实现 router。
 
-Default output root:
+默认输出根目录：
 
 ```text
 outputs/vision_ts_routing/expert_predictions/
@@ -53,16 +53,16 @@ outputs/vision_ts_routing/expert_predictions/
 
 ---
 
-### Task 1: Define Tests for Lightweight Expert Formulas and Error Metrics
+### 任务 1：定义轻量专家公式和误差指标测试
 
-**Files:**
+**文件：**
 
-- Create: `tests/test_quitobench_lightweight_expert_cache.py`
-- Create later in Task 2: `tools/quitobench_lightweight_expert_cache.py`
+- 创建： `tests/test_quitobench_lightweight_expert_cache.py`
+- 任务 2 中创建： `tools/quitobench_lightweight_expert_cache.py`
 
-- [ ] **Step 1: Write the failing test file with imports and toy data**
+- [ ] **步骤 1：编写包含 import 和 toy data 的失败测试文件**
 
-Create `tests/test_quitobench_lightweight_expert_cache.py` with this initial content:
+创建 `tests/test_quitobench_lightweight_expert_cache.py`，初始内容如下：
 
 ```python
 from __future__ import annotations
@@ -129,9 +129,9 @@ def _toy_registry() -> pd.DataFrame:
     )
 ```
 
-- [ ] **Step 2: Add formula expectations**
+- [ ] **步骤 2：加入专家公式期望**
 
-Append these tests:
+追加以下测试：
 
 ```python
 def test_required_registry_columns_include_stage1_keys() -> None:
@@ -161,11 +161,11 @@ def test_compute_lightweight_expert_predictions_uses_history_only() -> None:
     np.testing.assert_allclose(linear, np.array([42.0, 47.0, 52.0, 57.0]), atol=1e-8)
 ```
 
-The `linear_trend` expectation is based on fitting `y = -3 + 5x` to the eight history points after least-squares smoothing on the toy sequence.
+`linear_trend` 的期望值来自对这条 toy 序列的 8 个 history 点做最小二乘拟合，拟合结果为 `y = -3 + 5x`。
 
-- [ ] **Step 3: Add error and oracle tests**
+- [ ] **步骤 3：加入误差和 oracle 测试**
 
-Append:
+追加：
 
 ```python
 def test_compute_error_table_and_oracle_summary() -> None:
@@ -191,15 +191,15 @@ def test_compute_error_table_and_oracle_summary() -> None:
     assert summary.loc[0, "best_fixed_expert"] == "seasonal_naive"
 ```
 
-- [ ] **Step 4: Run the test to verify it fails because the module does not exist**
+- [ ] **步骤 4：运行测试，确认因模块不存在而失败**
 
-Run:
+运行：
 
 ```bash
 conda run -n quito python -m pytest tests/test_quitobench_lightweight_expert_cache.py -q
 ```
 
-Expected:
+预期：
 
 ```text
 ModuleNotFoundError: No module named 'tools.quitobench_lightweight_expert_cache'
@@ -207,16 +207,16 @@ ModuleNotFoundError: No module named 'tools.quitobench_lightweight_expert_cache'
 
 ---
 
-### Task 2: Implement Core Lightweight Expert Functions
+### 任务 2：实现轻量专家核心函数
 
-**Files:**
+**文件：**
 
-- Create: `tools/quitobench_lightweight_expert_cache.py`
-- Test: `tests/test_quitobench_lightweight_expert_cache.py`
+- 创建： `tools/quitobench_lightweight_expert_cache.py`
+- 测试： `tests/test_quitobench_lightweight_expert_cache.py`
 
-- [ ] **Step 1: Create the module header, constants, and registry validation**
+- [ ] **步骤 1：创建模块头、常量和 registry 校验**
 
-Create `tools/quitobench_lightweight_expert_cache.py`:
+创建 `tools/quitobench_lightweight_expert_cache.py`：
 
 ```python
 """Stage 1.4a：QuitoBench sample-channel 轻量专家预测缓存。
@@ -302,9 +302,9 @@ def validate_registry(registry: pd.DataFrame) -> None:
         raise ValueError("registry 中 history_len 必须为正整数")
 ```
 
-- [ ] **Step 2: Add expert formula helpers**
+- [ ] **步骤 2：加入专家公式 helper**
 
-Append:
+追加：
 
 ```python
 def _finite_history(values: Sequence[float]) -> np.ndarray:
@@ -351,9 +351,9 @@ def _linear_trend(history: np.ndarray, pred_len: int) -> np.ndarray:
     return intercept + slope * future_x
 ```
 
-- [ ] **Step 3: Add prediction table builder**
+- [ ] **步骤 3：加入预测表构造函数**
 
-Append:
+追加：
 
 ```python
 def compute_lightweight_expert_predictions(
@@ -412,15 +412,15 @@ def compute_lightweight_expert_predictions(
     return predictions
 ```
 
-- [ ] **Step 4: Run the formula tests**
+- [ ] **步骤 4：运行专家公式测试**
 
-Run:
+运行：
 
 ```bash
 conda run -n quito python -m pytest tests/test_quitobench_lightweight_expert_cache.py::test_compute_lightweight_expert_predictions_uses_history_only -q
 ```
 
-Expected:
+预期：
 
 ```text
 1 passed
@@ -428,16 +428,16 @@ Expected:
 
 ---
 
-### Task 3: Implement Error Table and Oracle Summary
+### 任务 3：实现误差表和 oracle 汇总
 
-**Files:**
+**文件：**
 
-- Modify: `tools/quitobench_lightweight_expert_cache.py`
-- Test: `tests/test_quitobench_lightweight_expert_cache.py`
+- 修改： `tools/quitobench_lightweight_expert_cache.py`
+- 测试： `tests/test_quitobench_lightweight_expert_cache.py`
 
-- [ ] **Step 1: Add prediction column helper and error computation**
+- [ ] **步骤 1：加入预测列 helper 和误差计算**
 
-Append:
+追加：
 
 ```python
 def _prediction_columns(predictions: pd.DataFrame) -> list[str]:
@@ -498,9 +498,9 @@ def compute_error_table(
     return errors
 ```
 
-- [ ] **Step 2: Add oracle summary**
+- [ ] **步骤 2：加入 oracle 汇总**
 
-Append:
+追加：
 
 ```python
 def compute_oracle_summary(errors: pd.DataFrame) -> pd.DataFrame:
@@ -541,15 +541,15 @@ def compute_oracle_summary(errors: pd.DataFrame) -> pd.DataFrame:
     )
 ```
 
-- [ ] **Step 3: Run the error/oracle test**
+- [ ] **步骤 3：运行误差和 oracle 测试**
 
-Run:
+运行：
 
 ```bash
 conda run -n quito python -m pytest tests/test_quitobench_lightweight_expert_cache.py::test_compute_error_table_and_oracle_summary -q
 ```
 
-Expected:
+预期：
 
 ```text
 1 passed
@@ -557,16 +557,16 @@ Expected:
 
 ---
 
-### Task 4: Add Output Writing, Manifest, and Profiling Tests
+### 任务 4：加入输出写入、manifest 和 profiling 测试
 
-**Files:**
+**文件：**
 
-- Modify: `tests/test_quitobench_lightweight_expert_cache.py`
-- Modify: `tools/quitobench_lightweight_expert_cache.py`
+- 修改： `tests/test_quitobench_lightweight_expert_cache.py`
+- 修改： `tools/quitobench_lightweight_expert_cache.py`
 
-- [ ] **Step 1: Add tests for registry validation and output writing**
+- [ ] **步骤 1：加入 registry 校验和输出写入测试**
 
-Append to `tests/test_quitobench_lightweight_expert_cache.py`:
+追加到 `tests/test_quitobench_lightweight_expert_cache.py`：
 
 ```python
 def test_validate_registry_rejects_duplicate_physical_window_id() -> None:
@@ -620,9 +620,9 @@ def test_write_expert_cache_outputs_writes_expected_files(tmp_path: Path) -> Non
     assert loaded_predictions[["physical_window_id", "expert_id"]].duplicated().sum() == 0
 ```
 
-- [ ] **Step 2: Add manifest and output functions**
+- [ ] **步骤 2：加入 manifest 和输出函数**
 
-Append to `tools/quitobench_lightweight_expert_cache.py`:
+追加到 `tools/quitobench_lightweight_expert_cache.py`：
 
 ```python
 def build_cell_model_matrix(errors: pd.DataFrame) -> pd.DataFrame:
@@ -710,15 +710,15 @@ def write_expert_cache_outputs(
     return out_dir
 ```
 
-- [ ] **Step 3: Run the output tests**
+- [ ] **步骤 3：运行输出写入测试**
 
-Run:
+运行：
 
 ```bash
 conda run -n quito python -m pytest tests/test_quitobench_lightweight_expert_cache.py::test_write_expert_cache_outputs_writes_expected_files -q
 ```
 
-Expected:
+预期：
 
 ```text
 1 passed
@@ -726,16 +726,16 @@ Expected:
 
 ---
 
-### Task 5: Add Registry/Data Loading and CLI
+### 任务 5：加入 registry / 数据加载和 CLI
 
-**Files:**
+**文件：**
 
-- Modify: `tools/quitobench_lightweight_expert_cache.py`
-- Test: `tests/test_quitobench_lightweight_expert_cache.py`
+- 修改： `tools/quitobench_lightweight_expert_cache.py`
+- 测试： `tests/test_quitobench_lightweight_expert_cache.py`
 
-- [ ] **Step 1: Add loading helpers**
+- [ ] **步骤 1：加入加载 helper**
 
-Append to `tools/quitobench_lightweight_expert_cache.py`:
+追加到 `tools/quitobench_lightweight_expert_cache.py`：
 
 ```python
 def load_registry(registry_dir: Path, max_rows: int | None = None) -> tuple[pd.DataFrame, dict[str, object]]:
@@ -775,9 +775,9 @@ def extract_histories_and_targets(
     return histories, targets
 ```
 
-- [ ] **Step 2: Add CLI parse and main**
+- [ ] **步骤 2：加入 CLI 参数解析和 main**
 
-Append:
+追加：
 
 ```python
 def parse_args() -> argparse.Namespace:
@@ -836,15 +836,15 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 3: Run all Stage 1.4a unit tests**
+- [ ] **步骤 3：运行全部 Stage 1.4a 单元测试**
 
-Run:
+运行：
 
 ```bash
 conda run -n quito python -m pytest tests/test_quitobench_lightweight_expert_cache.py -q
 ```
 
-Expected:
+预期：
 
 ```text
 5 passed
@@ -852,17 +852,17 @@ Expected:
 
 ---
 
-### Task 6: Run Smoke Cache and Record Experiment Log
+### 任务 6：运行 smoke 缓存并记录实验日志
 
-**Files:**
+**文件：**
 
-- Runtime output: `outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/lightweight_v1__smoke_max_rows_512/`
-- Create: `experiment_logs/YYYY-MM-DD_HHMM_stage1_4a_lightweight_expert_cache.md`
-- Modify: `experiment_logs/实验日志总览.md`
+- 运行输出： `outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/lightweight_v1__smoke_max_rows_512/`
+- 创建： `experiment_logs/YYYY-MM-DD_HHMM_stage1_4a_lightweight_expert_cache.md`
+- 修改： `experiment_logs/实验日志总览.md`
 
-- [ ] **Step 1: Run smoke cache**
+- [ ] **步骤 1：运行 smoke 缓存**
 
-Run:
+运行：
 
 ```bash
 conda run -n quito python tools/quitobench_lightweight_expert_cache.py \
@@ -870,7 +870,7 @@ conda run -n quito python tools/quitobench_lightweight_expert_cache.py \
   --expert-set-id lightweight_v1__smoke_max_rows_512
 ```
 
-Expected terminal shape:
+预期终端输出形态：
 
 ```text
 [done] output_dir=...
@@ -879,9 +879,9 @@ Expected terminal shape:
 [done] latency_ms_per_window=...
 ```
 
-- [ ] **Step 2: Inspect smoke manifest and uniqueness**
+- [ ] **步骤 2：检查 smoke manifest 和唯一性**
 
-Run:
+运行：
 
 ```bash
 conda run -n quito python - <<'PY'
@@ -904,7 +904,7 @@ print("runs_neural_experts", manifest["runs_neural_experts"])
 PY
 ```
 
-Expected:
+预期：
 
 ```text
 windows 512
@@ -917,11 +917,11 @@ implements_router False
 runs_neural_experts False
 ```
 
-Small floating-point output such as `2.220446049250313e-16` is acceptable for `soft_weight_max_abs_error`.
+`soft_weight_max_abs_error` 若出现 `2.220446049250313e-16` 这类浮点误差也可接受。
 
-- [ ] **Step 3: Write experiment log**
+- [ ] **步骤 3：编写实验日志**
 
-Create `experiment_logs/YYYY-MM-DD_HHMM_stage1_4a_lightweight_expert_cache.md` with:
+创建 `experiment_logs/YYYY-MM-DD_HHMM_stage1_4a_lightweight_expert_cache.md`，内容如下：
 
 ```markdown
 # Stage 1.4a：轻量专家预测缓存 smoke
@@ -977,11 +977,11 @@ outputs/vision_ts_routing/expert_predictions/qb_h192_p96_quito_overlap_8478f330_
 Stage 1.4a smoke 若通过，说明专家预测缓存主键、输出 schema 和 oracle error 计算可以工作。后续可扩大到正式 working registry，或先接入 Stage 1.3a visual encoder adapter smoke。
 ```
 
-Replace the blank values with actual command output.
+用实际命令输出填充空值。
 
-- [ ] **Step 4: Update experiment log overview**
+- [ ] **步骤 4：Update experiment log overview**
 
-Append one row to `experiment_logs/实验日志总览.md` using the existing table/list style. The row must mention:
+按 `experiment_logs/实验日志总览.md` 现有表格或列表风格追加一行。该行必须提到：
 
 ```text
 Stage 1.4a lightweight expert cache smoke；不实现 router；不运行 neural experts；输出 lightweight_v1__smoke_max_rows_512。
@@ -989,29 +989,29 @@ Stage 1.4a lightweight expert cache smoke；不实现 router；不运行 neural 
 
 ---
 
-### Task 7: Run Broader Verification and Commit
+### 任务 7：运行更完整验证并提交
 
-**Files:**
+**文件：**
 
-- Modify staged files from Tasks 1-6.
+- 修改任务 1-6 中产生的实现、测试和日志文件。
 
-- [ ] **Step 1: Run focused tests**
+- [ ] **步骤 1：运行聚焦测试**
 
-Run:
+运行：
 
 ```bash
 conda run -n quito python -m pytest tests/test_quitobench_lightweight_expert_cache.py -q
 ```
 
-Expected:
+预期：
 
 ```text
 5 passed
 ```
 
-- [ ] **Step 2: Run relevant regression tests**
+- [ ] **步骤 2：运行相关回归测试**
 
-Run:
+运行：
 
 ```bash
 conda run -n quito python -m pytest \
@@ -1021,31 +1021,31 @@ conda run -n quito python -m pytest \
   -q
 ```
 
-Expected:
+预期：
 
 ```text
 all selected tests pass
 ```
 
-- [ ] **Step 3: Check git diff**
+- [ ] **步骤 3：Check git diff**
 
-Run:
+运行：
 
 ```bash
 git diff -- tools/quitobench_lightweight_expert_cache.py tests/test_quitobench_lightweight_expert_cache.py experiment_logs/实验日志总览.md experiment_logs/*_stage1_4a_lightweight_expert_cache.md
 ```
 
-Verify:
+检查：
 
-- No router/gate implementation appears.
-- No visual encoder training appears.
-- No neural expert framework is invoked.
-- `physical_window_id` and `sample_set_id` are present in prediction and error paths.
-- Comments and project-specific docs are in Chinese.
+- 没有出现 router/gate 实现。
+- 没有出现视觉 encoder 训练。
+- 没有调用 neural expert 框架。
+- prediction 和 error 路径均保留 `physical_window_id` 和 `sample_set_id`。
+- 注释和项目语义相关文档使用中文。
 
-- [ ] **Step 4: Commit implementation**
+- [ ] **步骤 4：提交实现**
 
-Run:
+运行：
 
 ```bash
 git add \
@@ -1056,7 +1056,7 @@ git add \
 git commit -m "feat: add stage 1.4a lightweight expert cache"
 ```
 
-Expected:
+预期：
 
 ```text
 [main <hash>] feat: add stage 1.4a lightweight expert cache
@@ -1064,20 +1064,20 @@ Expected:
 
 ---
 
-## Self-Review
+## 自检
 
-Spec coverage:
+规格覆盖：
 
-- Framework reuse boundary: covered by using only project protocol code in 1.4a and leaving neural framework reuse to 1.4b.
-- `physical_window_id` primary key: covered by tests and prediction/error uniqueness checks.
-- `sample_set_id` retention: covered by prediction/error schema and manifest.
-- History-only prediction: covered by formulas that accept only history and by manifest `future_read_policy`.
-- Target use only for error/oracle: covered by `compute_error_table`.
-- No router / no visual encoder / no neural experts: covered by manifest flags and diff checklist.
-- Profiling output: covered by `cell_model_matrix.csv` and `oracle_summary.csv`.
-- Experiment logging: covered by Task 6.
+- 框架复用边界：Stage 1.4a 只实现项目协议层，neural 框架复用留到 Stage 1.4b。
+- `physical_window_id` 主键：由测试和 prediction/error 唯一性检查覆盖。
+- `sample_set_id` 保留：由 prediction/error schema 和 manifest 覆盖。
+- history-only 预测：由只接收 history 的专家公式和 manifest 中的 `future_read_policy` 覆盖。
+- target 只用于 error/oracle：由 `compute_error_table` 覆盖。
+- 不实现 router、不运行视觉 encoder、不运行 neural experts：由 manifest 标志和 diff 检查清单覆盖。
+- profiling 输出：由 `cell_model_matrix.csv` 和 `oracle_summary.csv` 覆盖。
+- 实验日志：由任务 6 覆盖。
 
-Placeholder scan target:
+保留词扫描目标：
 
 ```bash
 python - <<'PY'
@@ -1100,4 +1100,4 @@ for needle in needles:
 PY
 ```
 
-Expected: no output.
+预期： no output.
