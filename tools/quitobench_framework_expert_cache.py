@@ -629,6 +629,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--learning-rate", type=float, default=0.001)
+    parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--kernel-size", type=int, default=25)
     parser.add_argument("--patch-len", type=int, default=16)
     parser.add_argument("--stride", type=int, default=8)
@@ -638,6 +639,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--e-layers", type=int, default=2)
     parser.add_argument("--num-blocks", type=int, default=2)
     parser.add_argument("--norm-type", default="layer")
+    parser.add_argument("--dropout", type=float, default=None)
+    parser.add_argument("--fc-dropout", type=float, default=None)
+    parser.add_argument("--head-dropout", type=float, default=None)
+    parser.add_argument("--revin", dest="revin", action="store_true", default=True)
+    parser.add_argument("--no-revin", dest="revin", action="store_false")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     return parser.parse_args()
 
@@ -650,12 +656,17 @@ def main() -> None:
             epochs=args.epochs,
             batch_size=args.batch_size,
             learning_rate=args.learning_rate,
+            weight_decay=args.weight_decay,
             patch_len=args.patch_len,
             stride=args.stride,
             d_model=args.d_model,
             d_ff=args.d_ff,
             n_heads=args.n_heads,
             e_layers=args.e_layers,
+            dropout=args.dropout if args.dropout is not None else PatchTSTExpertConfig.dropout,
+            fc_dropout=args.fc_dropout if args.fc_dropout is not None else PatchTSTExpertConfig.fc_dropout,
+            head_dropout=args.head_dropout if args.head_dropout is not None else PatchTSTExpertConfig.head_dropout,
+            revin=args.revin,
         )
     elif args.expert_model == "tsmixer":
         config = TSMixerExpertConfig(
@@ -663,9 +674,12 @@ def main() -> None:
             epochs=args.epochs,
             batch_size=args.batch_size,
             learning_rate=args.learning_rate,
+            weight_decay=args.weight_decay,
             num_blocks=args.num_blocks,
             d_ff=args.d_ff,
             norm_type=args.norm_type,
+            dropout=args.dropout if args.dropout is not None else TSMixerExpertConfig.dropout,
+            revin=args.revin,
         )
     else:
         config = DLinearExpertConfig(
@@ -673,7 +687,9 @@ def main() -> None:
             epochs=args.epochs,
             batch_size=args.batch_size,
             learning_rate=args.learning_rate,
+            weight_decay=args.weight_decay,
             kernel_size=args.kernel_size,
+            revin=args.revin,
         )
     start = time.perf_counter()
     load_max_rows = None if args.stratified_rows is not None else args.max_rows

@@ -18,6 +18,7 @@ from tools.quitobench_framework_expert_cache import (
     build_dlinear_prediction_table,
     build_patchtst_prediction_table,
     build_tsmixer_prediction_table,
+    parse_args,
     select_stratified_registry,
     train_quito_patchtst_model,
     train_quito_dlinear_model,
@@ -292,3 +293,55 @@ def test_select_stratified_registry_balances_split_subset_cell_groups() -> None:
     assert counts.min() == 2
     assert counts.max() == 2
     assert set(sampled["split"]) == {"train", "valid", "test"}
+
+
+def test_patchtst_config_can_disable_revin_and_override_regularization() -> None:
+    config = PatchTSTExpertConfig(
+        revin=False,
+        dropout=0.2,
+        fc_dropout=0.15,
+        head_dropout=0.05,
+        weight_decay=0.01,
+    )
+
+    assert config.revin is False
+    assert config.dropout == pytest.approx(0.2)
+    assert config.fc_dropout == pytest.approx(0.15)
+    assert config.head_dropout == pytest.approx(0.05)
+    assert config.weight_decay == pytest.approx(0.01)
+
+
+def test_tsmixer_config_can_disable_revin_and_override_dropout() -> None:
+    config = TSMixerExpertConfig(revin=False, dropout=0.2, weight_decay=0.01)
+
+    assert config.revin is False
+    assert config.dropout == pytest.approx(0.2)
+    assert config.weight_decay == pytest.approx(0.01)
+
+
+def test_parse_args_exposes_stage14d_diagnostic_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "prog",
+            "--expert-model",
+            "patchtst",
+            "--no-revin",
+            "--weight-decay",
+            "0.01",
+            "--dropout",
+            "0.2",
+            "--fc-dropout",
+            "0.15",
+            "--head-dropout",
+            "0.05",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.revin is False
+    assert args.weight_decay == pytest.approx(0.01)
+    assert args.dropout == pytest.approx(0.2)
+    assert args.fc_dropout == pytest.approx(0.15)
+    assert args.head_dropout == pytest.approx(0.05)
