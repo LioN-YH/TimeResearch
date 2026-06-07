@@ -17,6 +17,7 @@ from typing import Mapping, Sequence
 
 import numpy as np
 import pandas as pd
+import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -134,6 +135,152 @@ def _spectral_features(values: np.ndarray, eps: float) -> tuple[float, float]:
     normalized_entropy = entropy / math.log(len(probs))
     dominant_strength = float(np.max(nonzero_power) / total)
     return float(np.clip(normalized_entropy, 0.0, 1.0)), float(np.clip(dominant_strength, 0.0, 1.0))
+
+
+def _torch_clean_quantiles(row: torch.Tensor, finite_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    clean = row[finite_mask]
+    if clean.numel() == 0:
+        zero = torch.zeros((), dtype=row.dtype, device=row.device)
+        return zero, zero, zero
+    qs = torch.quantile(clean, torch.tensor([0.25, 0.5, 0.75], dtype=row.dtype, device=row.device))
+    return qs[0], qs[1], qs[2]
+
+
+def _torch_last_finite(row: torch.Tensor, finite_mask: torch.Tensor) -> torch.Tensor:
+    clean = row[finite_mask]
+    if clean.numel() == 0:
+        return torch.zeros((), dtype=row.dtype, device=row.device)
+    return clean[-1]
+
+
+def _torch_slope(row: torch.Tensor, finite_mask: torch.Tensor) -> torch.Tensor:
+    if int(finite_mask.sum().item()) < 2:
+        return torch.zeros((), dtype=row.dtype, device=row.device)
+    x = torch.arange(row.numel(), dtype=row.dtype, device=row.device)[finite_mask]
+    y = row[finite_mask]
+    x_centered = x - x.mean()
+    denom = torch.dot(x_centered, x_centered)
+    if float(denom.detach().cpu()) <= 0.0:
+        return torch.zeros((), dtype=row.dtype, device=row.device)
+    return torch.dot(x_centered, y - y.mean()) / denom
+
+
+def _torch_autocorr(filled: torch.Tensor, lag: int) -> torch.Tensor:
+    if lag <= 0 or filled.numel() <= lag:
+        return torch.zeros((), dtype=filled.dtype, device=filled.device)
+    centered = filled - filled.mean()
+    denom = torch.dot(centered, centered)
+    if float(denom.detach().cpu()) <= 0.0:
+        return torch.zeros((), dtype=filled.dtype, device=filled.device)
+    return torch.dot(centered[:-lag], centered[lag:]) / denom
+
+
+def compute_light_proxy_torch(histories: torch.Tensor, periods: torch.Tensor | Sequence[int]) -> torch.Tensor:
+    """在线 light proxy torch kernel。
+
+    输入只包含 history batch，不接受 target/future。输出列顺序严格等于
+    `FEATURE_COLUMNS`，用于和 Stage 1.1 离线 cache / manifest 对齐。
+    """
+
+    if histories.ndim != 2:
+        raise ValueError(f"histories 必须为 [B, L]，当前 shape={tuple(histories.shape)}")
+    device = histories.device
+    x = histories.to(dtype=torch.float32)
+    periods_tensor = torch.as_tensor(periods, dtype=torch.int64, device=device)
+    if periods_tensor.ndim != 1 or periods_tensor.numel() != x.shape[0]:
+        raise ValueError("periods 必须为长度等于 batch size 的一维张量或序列")
+
+    finite = torch.isfinite(x)
+    counts = finite.sum(dim=1).clamp_min(1).to(dtype=x.dtype)
+    missing_ratio = 1.0 - finite.to(dtype=x.dtype).mean(dim=1)
+    safe = torch.where(finite, x, torch.zeros_like(x))
+    mean = safe.sum(dim=1) / counts
+    centered_clean = torch.where(finite, x - mean[:, None], torch.zeros_like(x))
+    std = torch.sqrt((centered_clean * centered_clean).sum(dim=1) / counts)
+    min_values = torch.where(finite, x, torch.full_like(x, float("inf"))).amin(dim=1)
+    max_values = torch.where(finite, x, torch.full_like(x, float("-inf"))).amax(dim=1)
+    has_finite = finite.any(dim=1)
+    min_values = torch.where(has_finite, min_values, torch.zeros_like(min_values))
+    max_values = torch.where(has_finite, max_values, torch.zeros_like(max_values))
+    amplitude = max_values - min_values
+
+    q25_values = []
+    median_values = []
+    q75_values = []
+    last_values = []
+    slope_values = []
+    acf_period_values = []
+    filled_rows = []
+    for row, mask, period, row_mean in zip(x, finite, periods_tensor, mean, strict=True):
+        q25, median, q75 = _torch_clean_quantiles(row, mask)
+        q25_values.append(q25)
+        median_values.append(median)
+        q75_values.append(q75)
+        last_values.append(_torch_last_finite(row, mask))
+        slope_values.append(_torch_slope(row, mask))
+        filled = torch.where(mask, row, row_mean)
+        filled_rows.append(filled)
+        acf_period_values.append(_torch_autocorr(filled, int(period.item())))
+
+    q25_tensor = torch.stack(q25_values)
+    median = torch.stack(median_values)
+    q75_tensor = torch.stack(q75_values)
+    iqr = q75_tensor - q25_tensor
+    last_value = torch.stack(last_values)
+    slope = torch.stack(slope_values)
+    filled = torch.stack(filled_rows)
+
+    recent_len = max(2, int(math.ceil(x.shape[1] * ProxyConfig().recent_fraction)))
+    recent_std = filled[:, -recent_len:].std(dim=1, unbiased=False)
+    full_std = filled.std(dim=1, unbiased=False)
+    recent_std_ratio = recent_std / (full_std + 1e-8)
+
+    centered = filled - filled.mean(dim=1, keepdim=True)
+    denom = (centered * centered).sum(dim=1)
+    if x.shape[1] > 1:
+        acf_lag1_raw = (centered[:, :-1] * centered[:, 1:]).sum(dim=1) / denom.clamp_min(1e-30)
+        acf_lag1 = torch.where(denom > 0.0, acf_lag1_raw, torch.zeros_like(acf_lag1_raw))
+    else:
+        acf_lag1 = torch.zeros(x.shape[0], dtype=x.dtype, device=device)
+    acf_period = torch.stack(acf_period_values)
+
+    if x.shape[1] < 4:
+        spectral_entropy = torch.zeros(x.shape[0], dtype=x.dtype, device=device)
+        dominant_frequency_strength = torch.zeros(x.shape[0], dtype=x.dtype, device=device)
+    else:
+        power = torch.abs(torch.fft.rfft(centered, dim=1)) ** 2
+        if power.shape[1] <= 2:
+            spectral_entropy = torch.zeros(x.shape[0], dtype=x.dtype, device=device)
+            dominant_frequency_strength = torch.zeros(x.shape[0], dtype=x.dtype, device=device)
+        else:
+            nonzero_power = power[:, 1:]
+            total = nonzero_power.sum(dim=1)
+            probs = nonzero_power / total.clamp_min(ProxyConfig().fft_eps)[:, None]
+            entropy = -(probs * torch.log(probs + ProxyConfig().fft_eps)).sum(dim=1)
+            normalized_entropy = entropy / math.log(nonzero_power.shape[1])
+            dominant = nonzero_power.amax(dim=1) / total.clamp_min(ProxyConfig().fft_eps)
+            valid = total > ProxyConfig().fft_eps
+            spectral_entropy = torch.where(valid, normalized_entropy.clamp(0.0, 1.0), torch.zeros_like(normalized_entropy))
+            dominant_frequency_strength = torch.where(valid, dominant.clamp(0.0, 1.0), torch.zeros_like(dominant))
+
+    columns = {
+        "mean": mean,
+        "std": std,
+        "median": median,
+        "iqr": iqr,
+        "min": min_values,
+        "max": max_values,
+        "amplitude": amplitude,
+        "last_value": last_value,
+        "missing_ratio": missing_ratio,
+        "slope": slope,
+        "recent_std_ratio": recent_std_ratio,
+        "acf_lag1": acf_lag1,
+        "acf_period": acf_period,
+        "spectral_entropy": spectral_entropy,
+        "dominant_frequency_strength": dominant_frequency_strength,
+    }
+    return torch.stack([columns[name] for name in FEATURE_COLUMNS], dim=1)
 
 
 def compute_window_proxy(values: Sequence[float], period: int, config: ProxyConfig | None = None) -> dict[str, float]:

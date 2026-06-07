@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+import torch
 
 from tools.quitobench_sample_channel_light_proxy import (
+    FEATURE_COLUMNS,
     ProxyConfig,
     compute_light_proxy_features,
+    compute_light_proxy_torch,
     compute_window_proxy,
     write_proxy_outputs,
 )
@@ -125,3 +129,46 @@ def test_smoke_proxy_outputs_do_not_overwrite_full_outputs(tmp_path: Path) -> No
     smoke_manifest = pd.read_json(smoke_dir / "manifest.json", typ="series")
     assert smoke_manifest["run_scope"] == "smoke"
     assert smoke_manifest["max_rows"] == 1
+
+
+def test_compute_light_proxy_torch_matches_numpy_reference_feature_order() -> None:
+    histories = torch.tensor(
+        [
+            [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            [1.0, float("nan"), 1.0, 2.0, 3.0, 5.0],
+        ],
+        dtype=torch.float32,
+    )
+    periods = torch.tensor([2, 3], dtype=torch.int64)
+
+    torch_proxy = compute_light_proxy_torch(histories, periods)
+    expected = np.array(
+        [
+            [compute_window_proxy(row.tolist(), period=int(period))[feature] for feature in FEATURE_COLUMNS]
+            for row, period in zip(histories, periods, strict=True)
+        ],
+        dtype=np.float32,
+    )
+
+    assert torch_proxy.shape == (2, len(FEATURE_COLUMNS))
+    assert torch_proxy.device.type == "cpu"
+    np.testing.assert_allclose(torch_proxy.detach().cpu().numpy(), expected, rtol=1e-5, atol=1e-5)
+
+
+def test_compute_light_proxy_torch_runs_on_cuda_when_available() -> None:
+    if not torch.cuda.is_available():
+        return
+    histories = torch.tensor(
+        [
+            [1.0, 2.0, 4.0, 8.0, 16.0, 32.0],
+            [3.0, 3.0, 3.0, 3.0, 3.0, 3.0],
+        ],
+        dtype=torch.float32,
+    )
+    periods = torch.tensor([2, 4], dtype=torch.int64)
+
+    cpu_proxy = compute_light_proxy_torch(histories, periods)
+    cuda_proxy = compute_light_proxy_torch(histories.cuda(), periods.cuda())
+
+    assert cuda_proxy.device.type == "cuda"
+    torch.testing.assert_close(cuda_proxy.cpu(), cpu_proxy, rtol=1e-5, atol=1e-5)
