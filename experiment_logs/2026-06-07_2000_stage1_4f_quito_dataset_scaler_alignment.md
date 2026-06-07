@@ -185,7 +185,35 @@ oracle_gap_vs_best_fixed=3.068771e9
 
 因此后续不能基于 Stage 1.4e wrapper-scaler 结果乐观推进 PatchTST。正式路线应以 Stage 1.4f 的 Quito dataset scaler 结果为准。
 
-## 8. 下一步
+## 8. normalized-scale 指标补充
+
+上述 MSE/MAE 是 Stage 1.4 cache 的 raw-scale error，用于和 raw prediction cache、真实业务尺度 baseline 对齐。QuitoBench 论文表格通常报告 normalized-scale test metric；两者不可直接比较。
+
+为对齐 Quito `TimeSeriesDataset(normalize=true)` 的评估口径，本阶段额外将 raw prediction 按对应 `(subset,item_id,channel)` scaler 转回 normalized scale 后重算 MSE/MAE。输出文件：
+
+```text
+outputs/vision_ts_routing/expert_comparisons/qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e/stage14f_h192_p96_20k_e20_lr1e4_quito_scaler/expert_metrics_by_scope_normalized.csv
+```
+
+overall normalized mean：
+
+| expert_id | normalized MSE | normalized MAE | windows |
+| --- | ---: | ---: | ---: |
+| `dlinear_quito` | `1.651472` | `0.406520` | 20000 |
+| `seasonal_naive` | `1.772907` | `0.280360` | 20000 |
+| `patchtst_quito` | `2.303010` | `0.457150` | 20000 |
+
+test split normalized mean：
+
+| expert_id | normalized MSE | normalized MAE | test windows |
+| --- | ---: | ---: | ---: |
+| `dlinear_quito` | `3.788486` | `0.454972` | 6389 |
+| `seasonal_naive` | `4.102289` | `0.307229` | 6389 |
+| `patchtst_quito` | `5.358025` | `0.516179` | 6389 |
+
+normalized MAE 已回到 `0.x` 量级，说明此前“MAE 数万”不是 sum，而是 raw-scale metric。normalized MSE 在当前 `192/96/S` test split 上仍高于论文常见 `0.x`，这说明当前任务网格、sample-channel 采样和 hard-cell 分布仍不能直接和论文官方 task grid 数值对齐。
+
+## 9. 下一步
 
 建议：
 
