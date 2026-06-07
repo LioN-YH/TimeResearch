@@ -155,13 +155,13 @@ def test_compute_lightweight_expert_predictions_uses_history_only() -> None:
 
     assert by_expert.loc["last_value", wide_cols].to_numpy(dtype=float).tolist() == [40.0, 40.0, 40.0, 40.0]
     assert by_expert.loc["seasonal_naive", wide_cols].to_numpy(dtype=float).tolist() == [10.0, 20.0, 30.0, 40.0]
-    assert by_expert.loc["recent_mean", wide_cols].to_numpy(dtype=float).tolist() == [25.0, 25.0, 25.0, 25.0]
+    assert by_expert.loc["recent_mean", wide_cols].to_numpy(dtype=float).tolist() == [35.0, 35.0, 35.0, 35.0]
 
     linear = by_expert.loc["linear_trend", wide_cols].to_numpy(dtype=float)
-    np.testing.assert_allclose(linear, np.array([42.0, 47.0, 52.0, 57.0]), atol=1e-8)
+    np.testing.assert_allclose(linear, np.array([38.92857143, 44.52380952, 50.11904762, 55.71428571]), atol=1e-8)
 ```
 
-`linear_trend` 的期望值来自对这条 toy 序列的 8 个 history 点做最小二乘拟合，拟合结果为 `y = -3 + 5x`。
+`recent_mean` 默认取 history 末尾 25%，这条 toy 序列对应最后 2 个点均值 `35`。`linear_trend` 的期望值来自对这条 toy 序列的 8 个 history 点做最小二乘拟合，拟合结果约为 `y = -5.8333 + 5.5952x`。
 
 - [ ] **步骤 3：加入误差和 oracle 测试**
 
@@ -222,7 +222,7 @@ ModuleNotFoundError: No module named 'tools.quitobench_lightweight_expert_cache'
 """Stage 1.4a：QuitoBench sample-channel 轻量专家预测缓存。
 
 本脚本只运行 history-only 的极轻量专家，生成专家预测、误差和 oracle
-profiling 缓存。不训练视觉 encoder，不实现 router，不运行 neural experts。
+profiling 缓存。不训练视觉 encoder，不实现 router，不运行神经网络专家。
 """
 
 from __future__ import annotations
@@ -928,7 +928,7 @@ runs_neural_experts False
 
 ## 1. 目的
 
-验证 Stage 1.4a 专家预测缓存 schema、history-only 轻量专家、误差计算、soft oracle 和 cell-level profiling，不实现 router，不运行视觉 encoder，不运行 neural experts。
+验证 Stage 1.4a 专家预测缓存 schema、history-only 轻量专家、误差计算、soft oracle 和 cell-level profiling，不实现 router，不运行视觉 encoder，不运行神经网络专家。
 
 ## 2. 输入
 
@@ -984,7 +984,7 @@ Stage 1.4a smoke 若通过，说明专家预测缓存主键、输出 schema 和 
 按 `experiment_logs/实验日志总览.md` 现有表格或列表风格追加一行。该行必须提到：
 
 ```text
-Stage 1.4a lightweight expert cache smoke；不实现 router；不运行 neural experts；输出 lightweight_v1__smoke_max_rows_512。
+Stage 1.4a lightweight expert cache smoke；不实现 router；不运行神经网络专家；输出 lightweight_v1__smoke_max_rows_512。
 ```
 
 ---
@@ -1073,7 +1073,7 @@ git commit -m "feat: add stage 1.4a lightweight expert cache"
 - `sample_set_id` 保留：由 prediction/error schema 和 manifest 覆盖。
 - history-only 预测：由只接收 history 的专家公式和 manifest 中的 `future_read_policy` 覆盖。
 - target 只用于 error/oracle：由 `compute_error_table` 覆盖。
-- 不实现 router、不运行视觉 encoder、不运行 neural experts：由 manifest 标志和 diff 检查清单覆盖。
+- 不实现 router、不运行视觉 encoder、不运行神经网络专家：由 manifest 标志和 diff 检查清单覆盖。
 - profiling 输出：由 `cell_model_matrix.csv` 和 `oracle_summary.csv` 覆盖。
 - 实验日志：由任务 6 覆盖。
 
