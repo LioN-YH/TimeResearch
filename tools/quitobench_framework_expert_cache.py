@@ -21,7 +21,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 ROOT = Path(__file__).resolve().parents[1]
-QUITO_ROOT = ROOT.parents[1] / "quito"
+QUITO_ROOT = ROOT / "quito"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 if QUITO_ROOT.exists() and str(QUITO_ROOT) not in sys.path:
@@ -98,6 +98,7 @@ class DLinearExpertConfig:
     stage: str = "stage1_4b_dlinear_expert_cache_smoke"
     expert_set_id: str = "dlinear_v1__smoke"
     seq_len: int = 192
+    decoder_label_len: int = 0
     pred_len: int = 96
     kernel_size: int = 25
     individual: bool = False
@@ -109,6 +110,7 @@ class DLinearExpertConfig:
     train_set_standardize: bool = False
     drop_last: bool = False
     scheduler: str = "none"
+    scheduler_t_max: int | None = None
     eta_min: float = 1e-5
     num_workers: int = 0
     eval_batch_size: int | None = None
@@ -347,6 +349,7 @@ class PatchTSTExpertConfig:
     stage: str = "stage1_4b_patchtst_expert_cache_smoke"
     expert_set_id: str = "patchtst_v1__stratified_smoke_5k_cuda"
     seq_len: int = 192
+    decoder_label_len: int = 0
     pred_len: int = 96
     patch_len: int = 16
     stride: int = 8
@@ -365,6 +368,7 @@ class PatchTSTExpertConfig:
     train_set_standardize: bool = False
     drop_last: bool = False
     scheduler: str = "none"
+    scheduler_t_max: int | None = None
     eta_min: float = 1e-5
     num_workers: int = 0
     eval_batch_size: int | None = None
@@ -379,6 +383,7 @@ class TSMixerExpertConfig:
     stage: str = "stage1_4b_tsmixer_expert_cache_smoke"
     expert_set_id: str = "tsmixer_v1__stratified_smoke_5k_cuda"
     seq_len: int = 192
+    decoder_label_len: int = 0
     pred_len: int = 96
     num_blocks: int = 2
     d_ff: int = 64
@@ -392,6 +397,7 @@ class TSMixerExpertConfig:
     train_set_standardize: bool = False
     drop_last: bool = False
     scheduler: str = "none"
+    scheduler_t_max: int | None = None
     eta_min: float = 1e-5
     num_workers: int = 0
     eval_batch_size: int | None = None
@@ -445,7 +451,7 @@ def _make_model(config: DLinearExpertConfig, device: str) -> DLinear:
         model_name="DLinear",
         seq_len=config.seq_len,
         forecast_horizon=config.pred_len,
-        decoder_label_len=0,
+        decoder_label_len=config.decoder_label_len,
         enc_in=1,
         c_out=1,
         kernel_size=config.kernel_size,
@@ -464,7 +470,7 @@ def _make_patchtst_model(config: PatchTSTExpertConfig, device: str) -> PatchTST:
         model_name="PatchTST",
         seq_len=config.seq_len,
         forecast_horizon=config.pred_len,
-        decoder_label_len=0,
+        decoder_label_len=config.decoder_label_len,
         enc_in=1,
         c_out=1,
         patch_len=config.patch_len,
@@ -490,7 +496,7 @@ def _make_tsmixer_model(config: TSMixerExpertConfig, device: str) -> TSMixer:
         model_name="TSMixer",
         seq_len=config.seq_len,
         forecast_horizon=config.pred_len,
-        decoder_label_len=0,
+        decoder_label_len=config.decoder_label_len,
         enc_in=1,
         c_out=1,
         num_blocks=config.num_blocks,
@@ -517,6 +523,7 @@ def _train_model(
     weight_decay: float,
     drop_last: bool,
     scheduler: str,
+    scheduler_t_max: int | None,
     eta_min: float,
     num_workers: int,
     random_seed: int,
@@ -540,7 +547,7 @@ def _train_model(
     if scheduler == "cosine":
         lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
-            T_max=max(epochs, 1),
+            T_max=int(scheduler_t_max) if scheduler_t_max is not None else max(epochs, 1),
             eta_min=eta_min,
         )
     elif scheduler != "none":
@@ -586,6 +593,7 @@ def _train_model(
         "train_elapsed_seconds": float(elapsed),
         "drop_last": bool(drop_last),
         "scheduler": scheduler,
+        "scheduler_t_max": int(scheduler_t_max) if scheduler_t_max is not None else max(int(epochs), 1),
         "eta_min": float(eta_min),
         "num_workers": int(num_workers),
         "final_learning_rate": float(optimizer.param_groups[0]["lr"]),
@@ -615,6 +623,7 @@ def train_quito_dlinear_model(
         weight_decay=cfg.weight_decay,
         drop_last=cfg.drop_last,
         scheduler=cfg.scheduler,
+        scheduler_t_max=cfg.scheduler_t_max,
         eta_min=cfg.eta_min,
         num_workers=cfg.num_workers,
         random_seed=cfg.random_seed,
@@ -647,6 +656,7 @@ def train_quito_patchtst_model(
         weight_decay=cfg.weight_decay,
         drop_last=cfg.drop_last,
         scheduler=cfg.scheduler,
+        scheduler_t_max=cfg.scheduler_t_max,
         eta_min=cfg.eta_min,
         num_workers=cfg.num_workers,
         random_seed=cfg.random_seed,
@@ -679,6 +689,7 @@ def train_quito_tsmixer_model(
         weight_decay=cfg.weight_decay,
         drop_last=cfg.drop_last,
         scheduler=cfg.scheduler,
+        scheduler_t_max=cfg.scheduler_t_max,
         eta_min=cfg.eta_min,
         num_workers=cfg.num_workers,
         random_seed=cfg.random_seed,
@@ -1004,9 +1015,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-set-standardize", action="store_true", default=False)
     parser.add_argument("--drop-last", action="store_true", default=False)
     parser.add_argument("--scheduler", choices=("none", "cosine"), default="none")
+    parser.add_argument("--scheduler-t-max", type=int, default=None)
     parser.add_argument("--eta-min", type=float, default=1e-5)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--seq-len", type=int, default=None)
+    parser.add_argument("--decoder-label-len", type=int, default=0)
     parser.add_argument("--pred-len", type=int, default=None)
     parser.add_argument("--kernel-size", type=int, default=25)
     parser.add_argument("--patch-len", type=int, default=16)
@@ -1022,6 +1035,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--head-dropout", type=float, default=None)
     parser.add_argument("--revin", dest="revin", action="store_true", default=True)
     parser.add_argument("--no-revin", dest="revin", action="store_false")
+    parser.add_argument("--random-seed", type=int, default=20260607)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--progress-every", type=int, default=0)
     return parser.parse_args()
@@ -1033,6 +1047,7 @@ def main() -> None:
         config = PatchTSTExpertConfig(
             expert_set_id=args.expert_set_id,
             epochs=args.epochs,
+            decoder_label_len=args.decoder_label_len,
             batch_size=args.batch_size,
             eval_batch_size=args.eval_batch_size,
             learning_rate=args.learning_rate,
@@ -1040,6 +1055,7 @@ def main() -> None:
             train_set_standardize=args.train_set_standardize,
             drop_last=args.drop_last,
             scheduler=args.scheduler,
+            scheduler_t_max=args.scheduler_t_max,
             eta_min=args.eta_min,
             num_workers=args.num_workers,
             patch_len=args.patch_len,
@@ -1052,11 +1068,13 @@ def main() -> None:
             fc_dropout=args.fc_dropout if args.fc_dropout is not None else PatchTSTExpertConfig.fc_dropout,
             head_dropout=args.head_dropout if args.head_dropout is not None else PatchTSTExpertConfig.head_dropout,
             revin=args.revin,
+            random_seed=args.random_seed,
         )
     elif args.expert_model == "tsmixer":
         config = TSMixerExpertConfig(
             expert_set_id=args.expert_set_id,
             epochs=args.epochs,
+            decoder_label_len=args.decoder_label_len,
             batch_size=args.batch_size,
             eval_batch_size=args.eval_batch_size,
             learning_rate=args.learning_rate,
@@ -1064,6 +1082,7 @@ def main() -> None:
             train_set_standardize=args.train_set_standardize,
             drop_last=args.drop_last,
             scheduler=args.scheduler,
+            scheduler_t_max=args.scheduler_t_max,
             eta_min=args.eta_min,
             num_workers=args.num_workers,
             num_blocks=args.num_blocks,
@@ -1071,11 +1090,13 @@ def main() -> None:
             norm_type=args.norm_type,
             dropout=args.dropout if args.dropout is not None else TSMixerExpertConfig.dropout,
             revin=args.revin,
+            random_seed=args.random_seed,
         )
     else:
         config = DLinearExpertConfig(
             expert_set_id=args.expert_set_id,
             epochs=args.epochs,
+            decoder_label_len=args.decoder_label_len,
             batch_size=args.batch_size,
             eval_batch_size=args.eval_batch_size,
             learning_rate=args.learning_rate,
@@ -1083,10 +1104,12 @@ def main() -> None:
             train_set_standardize=args.train_set_standardize,
             drop_last=args.drop_last,
             scheduler=args.scheduler,
+            scheduler_t_max=args.scheduler_t_max,
             eta_min=args.eta_min,
             num_workers=args.num_workers,
             kernel_size=args.kernel_size,
             revin=args.revin,
+            random_seed=args.random_seed,
         )
     start = time.perf_counter()
     load_max_rows = None if args.stratified_rows is not None else args.max_rows

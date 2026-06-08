@@ -32,7 +32,12 @@ from quito.models.auto import AutoModel
 from quito.trainers.auto import AutoTrainer
 from quito.utils.common import set_seed
 
-from tools.quitobench_quito_native_utils import aggregate_metric_sums, build_sample_indices, find_latest_checkpoint
+from tools.quitobench_quito_native_utils import (
+    aggregate_metric_sums,
+    build_sample_indices,
+    clear_resume_checkpoint_paths,
+    find_latest_checkpoint,
+)
 
 
 DEFAULT_OUTPUT_ROOT = ROOT / "outputs/vision_ts_routing/quito_native_sanity"
@@ -165,6 +170,7 @@ def train_then_evaluate_config(
 
     started = time.time()
     config = OmegaConf.load(train_config_path)
+    clear_resume_checkpoint_paths(config)
     use_cuda = device.startswith("cuda") and torch.cuda.is_available()
     local_rank = int(device.split(":", 1)[1]) if use_cuda and ":" in device else (-1 if not use_cuda else 0)
     data_config, model_config, training_config = AutoConfig.from_config(

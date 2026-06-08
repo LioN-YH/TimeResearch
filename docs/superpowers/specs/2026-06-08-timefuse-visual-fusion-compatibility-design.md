@@ -215,22 +215,42 @@ z_0 ... z_{D-1}
 
 ## 6. 实现边界
 
-建议新增本项目自有适配脚本，而不是直接修改 TimeFuse 上游文件：
+本支线代码必须与 QuitoBench 主线隔离，便于后续整体剥离。新增代码不放入根目录 `tools/` 或根目录 `tests/`，统一放入：
 
 ```text
-tools/timefuse_artifact_audit.py
-tools/timefuse_matrix_export.py
-tools/timefuse_visual_embedding_smoke.py
-tools/timefuse_fusion_ablation.py
+timefuse_visual_fusion/
 ```
 
-输出目录建议：
+推荐结构：
 
 ```text
-outputs/timefuse_visual_fusion/
+timefuse_visual_fusion/
+  README.md
+  src/timefuse_visual_fusion/
+    __init__.py
+    common.py
+    artifact_audit.py
+    matrix_export.py
+    visual_embedding_smoke.py
+    fusion_ablation.py
+  tests/
+    test_common.py
+    test_artifact_audit.py
+    test_matrix_export.py
+    test_visual_embedding_smoke.py
+    test_fusion_ablation.py
+  outputs/
 ```
 
-不要把 TimeFuse 输出混入现有 `outputs/vision_ts_routing/` 主线，避免 QuitoBench 和 TimeFuse artifact 口径混淆。
+如果需要复用既有 QuitoBench helper，只复制必要的轻量逻辑到 `timefuse_visual_fusion/src/timefuse_visual_fusion/common.py`，不要 import `tools.quitobench_common`。第一版只需要复制/重写 JSON manifest 读写、required columns、unique key 这类小 helper。
+
+输出目录建议放在支线内部：
+
+```text
+timefuse_visual_fusion/outputs/
+```
+
+不要把 TimeFuse 输出混入现有 `outputs/vision_ts_routing/` 主线，也不要把支线测试混入根目录 `tests/`。这样后续若确认 TimeFuse 成为主验证平台，可以把 `timefuse_visual_fusion/` 单独初始化为仓库或迁出当前工作区。
 
 ## 7. 风险与处理
 

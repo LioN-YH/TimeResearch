@@ -1,6 +1,13 @@
 from pathlib import Path
 
-from tools.quitobench_quito_native_utils import aggregate_metric_sums, build_sample_indices, find_latest_checkpoint
+from omegaconf import OmegaConf
+
+from tools.quitobench_quito_native_utils import (
+    aggregate_metric_sums,
+    build_sample_indices,
+    clear_resume_checkpoint_paths,
+    find_latest_checkpoint,
+)
 
 
 def test_aggregate_metric_sums_uses_sample_weighted_average() -> None:
@@ -29,3 +36,17 @@ def test_build_sample_indices_applies_stride_and_max_samples() -> None:
 
 def test_build_sample_indices_uses_full_dataset_when_no_limits() -> None:
     assert build_sample_indices(dataset_len=5, stride=1, max_samples=None) == [0, 1, 2, 3, 4]
+
+
+def test_clear_resume_checkpoint_paths_removes_evaluate_checkpoint_lists() -> None:
+    config = OmegaConf.create(
+        {
+            "model": {"checkpoint_path": ["./models/a.ckpt"]},
+            "resume": {"checkpoint_path": ["./models/b.ckpt"]},
+        }
+    )
+
+    clear_resume_checkpoint_paths(config)
+
+    assert config.model.checkpoint_path is None
+    assert config.resume.checkpoint_path is None

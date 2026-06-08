@@ -30,6 +30,8 @@ from tools.quitobench_framework_expert_cache import (
     train_quito_patchtst_model,
     train_quito_dlinear_model,
     train_quito_tsmixer_model,
+    _make_model,
+    _make_patchtst_model,
 )
 
 
@@ -461,6 +463,12 @@ def test_parse_args_exposes_stage14e_alignment_flags(monkeypatch: pytest.MonkeyP
             "cosine",
             "--eta-min",
             "0.00001",
+            "--scheduler-t-max",
+            "50",
+            "--decoder-label-len",
+            "48",
+            "--random-seed",
+            "16",
             "--num-workers",
             "2",
             "--eval-batch-size",
@@ -474,8 +482,37 @@ def test_parse_args_exposes_stage14e_alignment_flags(monkeypatch: pytest.MonkeyP
     assert args.drop_last is True
     assert args.scheduler == "cosine"
     assert args.eta_min == pytest.approx(0.00001)
+    assert args.scheduler_t_max == 50
+    assert args.decoder_label_len == 48
+    assert args.random_seed == 16
     assert args.num_workers == 2
     assert args.eval_batch_size == 64
+
+
+def test_model_builders_honor_decoder_label_len() -> None:
+    dlinear = _make_model(
+        DLinearExpertConfig(seq_len=8, pred_len=4, decoder_label_len=4, kernel_size=3),
+        device="cpu",
+    )
+    patchtst = _make_patchtst_model(
+        PatchTSTExpertConfig(
+            seq_len=8,
+            pred_len=4,
+            decoder_label_len=4,
+            patch_len=2,
+            stride=1,
+            d_model=16,
+            d_ff=32,
+            n_heads=2,
+            e_layers=1,
+        ),
+        device="cpu",
+    )
+
+    assert dlinear.decoder_label_len == 4
+    assert dlinear.config.decoder_label_len == 4
+    assert patchtst.decoder_label_len == 4
+    assert patchtst.config.decoder_label_len == 4
 
 
 def test_predict_with_model_inverse_transforms_standardized_predictions() -> None:

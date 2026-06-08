@@ -38,3 +38,12 @@ def build_sample_indices(dataset_len: int, stride: int = 1, max_samples: int | N
     if max_samples is not None:
         indices = indices[: int(max_samples)]
     return indices
+
+
+def clear_resume_checkpoint_paths(config) -> None:
+    """清空 evaluate YAML 中的 checkpoint，确保 train-eval 从头训练。"""
+
+    if "model" in config and "checkpoint_path" in config.model:
+        config.model.checkpoint_path = None
+    if "resume" in config and "checkpoint_path" in config.resume:
+        config.resume.checkpoint_path = None

@@ -7,12 +7,13 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 from typing import Sequence
 
 import numpy as np
 import pandas as pd
+
+from tools.quitobench_common import ensure_unique_key, filter_common_expert_windows, prediction_columns, require_columns, write_json_manifest
 
 
 DEFAULT_SAMPLE_SET_ID = "qb_h192_p96_quito_overlap_8478f330_stride96_2ccfd64e"
@@ -31,24 +32,72 @@ def load_error_tables(cache_dirs: Sequence[Path], required_experts: Sequence[str
         if not path.exists():
             raise FileNotFoundError(f"缺少 errors.parquet：{path}")
         frame = pd.read_parquet(path)
-        missing = {"physical_window_id", "expert_id", "mse", "mae"} - set(frame.columns)
-        if missing:
-            raise ValueError(f"{path} 缺少列：{sorted(missing)}")
+        require_columns(frame, {"physical_window_id", "expert_id", "mse", "mae"}, label=str(path))
         frame = frame[frame["expert_id"].astype(str).isin(required)].copy()
         frames.append(frame)
     errors = pd.concat(frames, ignore_index=True)
-    if errors[["physical_window_id", "expert_id"]].duplicated().any():
-        duplicated = errors[errors[["physical_window_id", "expert_id"]].duplicated()][["physical_window_id", "expert_id"]].head()
-        raise ValueError(f"合并后存在重复 expert-window 键：{duplicated.to_dict(orient='records')}")
+    ensure_unique_key(errors, ["physical_window_id", "expert_id"], label="合并后 errors")
     return errors
 
 
 def _filter_common_windows(errors: pd.DataFrame, required_experts: Sequence[str]) -> pd.DataFrame:
-    required = set(required_experts)
-    filtered = errors[errors["expert_id"].astype(str).isin(required)].copy()
-    expert_counts = filtered.groupby("physical_window_id")["expert_id"].nunique()
-    common_ids = expert_counts[expert_counts == len(required)].index
-    return filtered[filtered["physical_window_id"].isin(common_ids)].copy()
+    return filter_common_expert_windows(errors, required_experts)
+
+
+def _filter_common_prediction_windows(predictions: pd.DataFrame, required_experts: Sequence[str]) -> pd.DataFrame:
+    return filter_common_expert_windows(predictions, required_experts)
+
+
+def build_true_uniform_ensemble_metrics(
+    predictions: pd.DataFrame,
+    targets: dict[str, Sequence[float]],
+    required_experts: Sequence[str] = DEFAULT_REQUIRED_EXPERTS,
+) -> pd.DataFrame:
+    """先平均专家预测，再计算 uniform ensemble 的真实 MSE/MAE。"""
+
+    require_columns(predictions, {"physical_window_id", "expert_id"}, label="predictions")
+    yhat_cols = prediction_columns(predictions)
+    if not yhat_cols:
+        raise ValueError("predictions 缺少 yhat_* 预测列")
+    common = _filter_common_prediction_windows(predictions, required_experts)
+    if common.empty:
+        return pd.DataFrame(
+            [
+                {
+                    "num_common_windows": 0,
+                    "num_experts": 0,
+                    "true_uniform_mse": np.nan,
+                    "true_uniform_mae": np.nan,
+                }
+            ]
+        )
+
+    rows: list[dict[str, float]] = []
+    for physical_window_id, group in common.groupby("physical_window_id", sort=False):
+        target = np.asarray(targets[str(physical_window_id)], dtype=float)
+        yhat = group[yhat_cols].to_numpy(dtype=float)
+        if yhat.shape[1] != target.shape[0]:
+            raise ValueError(f"{physical_window_id} target 长度 {target.shape[0]} != prediction 长度 {yhat.shape[1]}")
+        uniform_prediction = yhat.mean(axis=0)
+        diff = uniform_prediction - target
+        rows.append(
+            {
+                "mse": float(np.mean(diff * diff)),
+                "mae": float(np.mean(np.abs(diff))),
+            }
+        )
+
+    metrics = pd.DataFrame(rows)
+    return pd.DataFrame(
+        [
+            {
+                "num_common_windows": int(common["physical_window_id"].nunique()),
+                "num_experts": int(common["expert_id"].nunique()),
+                "true_uniform_mse": float(metrics["mse"].mean()),
+                "true_uniform_mae": float(metrics["mae"].mean()),
+            }
+        ]
+    )
 
 
 def _summary_for_group(errors: pd.DataFrame, group_value: str | None = None, group_col: str | None = None) -> dict[str, object]:
@@ -133,7 +182,7 @@ def write_comparison_outputs(
     by_split.to_csv(output_dir / "comparison_by_split.csv", index=False)
     by_cell.to_csv(output_dir / "comparison_by_cell.csv", index=False)
     expert_metrics.to_csv(output_dir / "expert_metrics.csv", index=False)
-    (output_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_json_manifest(output_dir / "manifest.json", manifest)
     return output_dir
 
 
