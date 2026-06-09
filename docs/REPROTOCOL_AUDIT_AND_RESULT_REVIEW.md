@@ -514,6 +514,24 @@ outputs/vision_ts_routing/oracle_audit/matrix50k_v1_official96_48S_protocol_delt
 
 下表使用 `official96_48S` 参数版本的 normalized MAE。它比第 4 节旧参数表更适合作为当前 matrix50k 诊断依据。
 
+#### 10.7.1 总体汇总
+
+`official96_48S` 的 50k common windows 上，normalized 口径的整体结果如下：
+
+| 指标 | seasonal_naive | dlinear_quito | patchtst_quito |
+| --- | ---: | ---: | ---: |
+| MSE | 1.459632 | 55.972841 | 361.459653 |
+| MAE | 0.510185 | 0.451537 | 0.704657 |
+| oracle top1 rate | 0.50466 | 0.43654 | 0.05880 |
+
+补充解释：
+
+- normalized MAE 下，`dlinear_quito` 已优于 `seasonal_naive`，是当前 official-config 的 best fixed expert。
+- normalized MSE 仍由 `seasonal_naive` 领先，说明 small-std windows 对平方误差仍有强影响。
+- `patchtst_quito` 在 official-config 下明显改善，但仍没有恢复到 overall MAE 最优。
+
+#### 10.7.2 按 TSF cell 的 normalized MAE
+
 | TSF regime | expert | windows | current normalized MAE | Table 24 MAE | 差值 |
 | --- | --- | ---: | ---: | ---: | ---: |
 | HIGH HIGH HIGH | DLinear | 10152 | 0.130 | 0.189 | -0.059 |
@@ -540,6 +558,13 @@ outputs/vision_ts_routing/oracle_audit/matrix50k_v1_official96_48S_protocol_delt
 | LOW LOW LOW | DLinear | 3971 | 0.647 | 0.465 | +0.182 |
 | LOW LOW LOW | PatchTST | 3971 | 0.871 | 0.392 | +0.479 |
 | LOW LOW LOW | SNaive | 3971 | 0.528 | 0.604 | -0.076 |
+
+#### 10.7.3 按 subset 聚合的表现
+
+| subset | windows | best fixed expert | best fixed MSE | best fixed MAE | oracle top1 MAE |
+| --- | ---: | --- | ---: | ---: | ---: |
+| hour | 31617 | dlinear_quito | 0.636857 | 0.324711 | 0.291470 |
+| min | 18383 | seasonal_naive | 1.415113 | 0.457204 | 0.412695 |
 
 结论：
 

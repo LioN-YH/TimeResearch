@@ -1,0 +1,6 @@
+# DLinear has no upstream Quito configs/tune/dlinear directory in this checkout.
+# Keep this search space under tools/full so the full protocol can still run
+# tune -> finetune -> evaluate for the requested DLinear QuitoBench grids.
+model:
+  kernel_size: 'tune.choice([13, 25, 49])'
+  individual: 'tune.choice([False, True])'
